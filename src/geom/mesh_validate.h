@@ -94,6 +94,14 @@ typedef struct MeshValidateReport {
     f32 min_triangle_area;
     f32 max_triangle_area;
     bool self_intersection_checked;          /* always false for now, honestly */
+    /* True when the mesh was too large for the topology scratch buffers, so the
+     * connectivity checks did not RUN. This is not the same thing as failing
+     * them, and conflating the two is a reporting error rather than a harmless
+     * simplification: a 20.9-million-triangle tree was printed as INVALID with
+     * zero closed components and zero enclosed volume, which reads as a broken
+     * mesh when in fact nothing was measured. Callers that print a verdict must
+     * check this first and say "not validated". */
+    bool topology_not_checked;
 } MeshValidateReport;
 
 typedef struct MeshValidateOptions {

@@ -237,6 +237,21 @@ typedef struct TreeProfile {
     f32 order_length_ratio[10];    /* child axis length / parent remaining   */
     u32 flushes_per_year;
 
+    /* Nodes produced by ONE flush, per branch order.
+     *
+     * This is the difference between a tree and a diagram. An annual shoot is
+     * 0.3-0.6 m long and carries eight to fifteen nodes, each with an axillary
+     * bud. Treating one internode as one year -- which this engine originally did
+     * -- gives every shoot exactly ONE branching opportunity per year, an order of
+     * magnitude too few. The measured consequence was severe and visible: 423 of
+     * 825 axes were born in the final tenth of the tree's life with a mean length
+     * of 0.23 m, producing a bare pole with a tuft on top instead of a crown.
+     *
+     * internode_length_m therefore remains the ANNUAL EXTENSION (which is what
+     * keeps it consistent with the height curve), and the true internode is that
+     * divided by this count. */
+    u32 nodes_per_flush[10];
+
     /* Apical control: the share of a node's resource kept by the apical bud.
      * 0.5 is neutral; higher favours the leader. Decays with age for Rauh. */
     f32 apical_control;
@@ -344,6 +359,23 @@ typedef struct TreeResolved {
     u32 leaf_triangle_budget;
     f32 bark_feature_size_m;   /* target bark subdivision length              */
     u32 max_organs;
+    /* LONGITUDINAL detail, as a multiple of the profile's botanical internode
+     * length. cross_section_segments_* control detail AROUND a branch; this one
+     * controls detail ALONG it, and until it existed the two were not
+     * independent: quality could only make branches rounder, never coarser.
+     *
+     * Why it is expressed this way. Growth visits every botanical node -- that is
+     * where buds are, and moving them would change WHICH branches exist, so a
+     * draft tree would be a different tree rather than a coarser rendering of the
+     * same one. Instead, growth groups consecutive nodes into one geometric
+     * internode until their combined length reaches botanical_internode * this
+     * scale. Buds still sit at their true fractional positions along the result.
+     * At 1.0 every botanical node is its own segment; at 8.0 a draft tree carries
+     * roughly an eighth of the segments with the SAME branching architecture. */
+    f32 internode_geometry_scale;
+    /* Highest branch order this quality level will grow, already clamped to the
+     * profile's own limit. Growth must consult THIS, not the profile. */
+    u32 max_branch_order;
 } TreeResolved;
 
 /* Combines profile + settings + seed into the resolved individual. Pure: no

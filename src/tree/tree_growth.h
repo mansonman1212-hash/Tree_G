@@ -82,6 +82,15 @@ typedef struct GrowthResult {
     u32 buds_broken;
     u32 shoots_killed;
     u32 max_order_reached;
+    /* Why shoots stopped extending. A crown that comes out wrong is almost always
+     * wrong because shoots stopped for the wrong reason, and without these
+     * counters that is guesswork. Production diagnostics, not test scaffolding. */
+    u32 stopped_by_height;      /* reached the target height                  */
+    u32 stopped_by_envelope;    /* reached the crown surface                  */
+    u32 stopped_by_shade;       /* self-pruned after prolonged suppression    */
+    u32 starved_steps;          /* step-instances with too little resource     */
+    u32 extension_steps;        /* step-instances that actually extended       */
+
     bool hit_organ_limit;   /* reported honestly rather than hidden           */
     bool hit_step_limit;
     GrowthStepStats step[GROWTH_MAX_RECORDED_STEPS];

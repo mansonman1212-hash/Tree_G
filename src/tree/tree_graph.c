@@ -412,40 +412,48 @@ TgResult tree_graph_add_attachment(TreeGraph *g, u32 parent_organ, OrganType typ
 
 u32 tree_graph_kill_subtree(TreeGraph *g, u32 organ, u16 step, u32 extra_flags) {
     u32 changed = 0;
-    u32 i;
-    u32 n;
+    u32 cur;
 
     TG_CHECK(g != NULL);
     if (g->finalized || organ >= g->organs.count) { return 0; }
 
-    /* Mark the root of the subtree, then sweep forward. Because a child's id is
-     * always greater than its parent's, a single ascending pass propagates death
-     * to the whole subtree without recursion or a work stack -- and cannot
-     * overflow the stack on a deep axis. */
-    {
-        Organ *o = tree_graph_organ_mut(g, organ);
+    /* WALK THE SUBTREE, NOT THE WHOLE GRAPH.
+     *
+     * This used to mark the root and then sweep every organ with a higher id,
+     * propagating death through the ascending-id invariant. Correct, elegant, and
+     * O(TOTAL ORGANS) PER CALL -- which turned self-pruning into an O(n^2) cost
+     * that dominated everything else. Measured on a 100-year broadleaf: 30,000
+     * shade deaths across a 986,000-organ graph, i.e. some thirty billion organ
+     * visits, and generation took 83 seconds against 9 seconds for the 80-year
+     * tree. The tree was not the problem; this loop was.
+     *
+     * The replacement is an explicit-state depth-first walk over the
+     * first_child/next_sibling links: O(subtree), no recursion (a long axis chain
+     * would overflow the stack), and no scratch allocation. It cannot leave the
+     * subtree because the climb stops when it returns to `organ`. */
+    cur = organ;
+    for (;;) {
+        Organ *o = tree_graph_organ_mut(g, cur);
+        u32 child = o->first_child;
         if ((o->flags & ORGAN_FLAG_DEAD) == 0) {
             o->flags &= ~(u32)ORGAN_FLAG_ALIVE;
             o->flags |= ORGAN_FLAG_DEAD | extra_flags;
             o->death_step = step;
             changed++;
         }
+        if (child != TG_INVALID_ID) { cur = child; continue; }
+        for (;;) {
+            const Organ *c;
+            if (cur == organ) { return changed; }
+            c = tree_graph_organ(g, cur);
+            if (c->next_sibling != TG_INVALID_ID) {
+                cur = c->next_sibling;
+                break;
+            }
+            if (c->parent == TG_INVALID_ID) { return changed; }
+            cur = c->parent;
+        }
     }
-
-    n = (u32)g->organs.count;
-    for (i = organ + 1u; i < n; ++i) {
-        Organ *o = tree_graph_organ_mut(g, i);
-        const Organ *p;
-        if (o->parent == TG_INVALID_ID) { continue; }
-        p = tree_graph_organ(g, o->parent);
-        if ((p->flags & ORGAN_FLAG_DEAD) == 0) { continue; }
-        if ((o->flags & ORGAN_FLAG_DEAD) != 0) { continue; }
-        o->flags &= ~(u32)ORGAN_FLAG_ALIVE;
-        o->flags |= ORGAN_FLAG_DEAD | extra_flags;
-        o->death_step = step;
-        changed++;
-    }
-    return changed;
 }
 
 void tree_graph_accumulate_basipetal(TreeGraph *g,

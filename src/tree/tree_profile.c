@@ -227,6 +227,9 @@ static const TreeProfile g_broadleaf[] = {
         { 1.0f, 0.62f, 0.55f, 0.48f, 0.40f, 0.32f,
           0.28f, 0.24f, 0.20f, 0.18f },
         1,                              /* flushes_per_year                  */
+        /* Nodes per annual shoot. A vigorous leader flush carries a dozen; a weak
+         * high-order short shoot only a few. */
+        { 12u, 10u, 7u, 5u, 4u, 3u, 3u, 3u, 3u, 3u },
 
         0.62f,                          /* apical_control                    */
         0.0022f,                        /* decay per year -> decurrent crown */
@@ -332,6 +335,7 @@ static const TreeProfile g_conifer[] = {
         { 1.0f, 0.50f, 0.46f, 0.40f, 0.34f, 0.30f,
           0.26f, 0.22f, 0.20f, 0.18f },
         1,
+        { 14u, 8u, 6u, 4u, 3u, 3u, 3u, 3u, 3u, 3u },
 
         0.86f,                          /* strong, persistent apical control  */
         0.0004f,                        /* barely decays: stays excurrent     */
@@ -567,11 +571,33 @@ TgResult tree_profile_validate(const TreeProfile *p) {
      * higher orders are shorter and thinner-supported, and set angles move
      * toward horizontal. A profile violating this produces branch orders that
      * are scaled copies, which the directive forbids. */
+    TP_REQUIRE(p->nodes_per_flush[0] >= 3u,
+               "a leader flush must carry at least 3 nodes");
+    for (i = 0; i <= p->max_branch_order; ++i) {
+        TP_REQUIRE(p->nodes_per_flush[i] >= 1u && p->nodes_per_flush[i] <= 40u,
+                   "nodes_per_flush outside [1,40] at some order");
+        if (i > 0) {
+            TP_REQUIRE(p->nodes_per_flush[i] <= p->nodes_per_flush[i - 1],
+                       "nodes per flush must not increase with branch order");
+        }
+    }
     for (i = 1; i <= p->max_branch_order; ++i) {
         TP_REQUIRE(p->internode_length_m[i] > 0.0f,
                    "non-positive internode length at some order");
         TP_REQUIRE(p->internode_length_m[i] < p->internode_length_m[i - 1],
                    "internode length must decrease with branch order");
+        /* The DERIVED botanical internode -- annual extension divided among the
+         * flush's nodes -- must also decrease, and this is a genuinely separate
+         * requirement from the two above. Both arrays can be individually monotone
+         * while their quotient is not, and the quotient is what the grown tree
+         * actually shows: with 0.43 m over 12 nodes on the trunk and 0.34 m over
+         * 9 on a primary, primaries came out with LONGER internodes than the
+         * trunk. The growth test caught it. */
+        TP_REQUIRE(p->internode_length_m[i] / (f32)p->nodes_per_flush[i]
+                       < p->internode_length_m[i - 1]
+                             / (f32)p->nodes_per_flush[i - 1],
+                   "derived internode length (extension / nodes per flush) must "
+                   "decrease with branch order");
         TP_REQUIRE(p->order_length_ratio[i] > 0.0f &&
                    p->order_length_ratio[i] < 1.0f,
                    "order_length_ratio must lie in (0,1) for lateral orders");
@@ -704,30 +730,59 @@ typedef struct QualityBudget {
     u32 leaf_tris;
     f32 bark_feature_m;
     u32 max_organs;
+    f32 internode_scale;
+    u32 order_cap;
 } QualityBudget;
 
 static QualityBudget quality_budget(TreeQuality q) {
     QualityBudget b;
     switch (q) {
-    /* Organ ceilings are sized against what a real skeleton needs. A mature
-     * broadleaf with eight branch orders carries on the order of 100,000 living
-     * twig tips, and every tip needs its internodes and buds, so a reference tree
-     * legitimately runs into the millions of organs. Earlier ceilings were set
-     * before that was measured and were themselves limiting the tree's density. */
+    /* CEILINGS AND DETAIL, BOTH SIZED AGAINST MEASUREMENT.
+     *
+     * A mature broadleaf's shoot system was measured, on this model, at roughly
+     * 20 KILOMETRES of total shoot length carried on some 43,000 axes. Divided
+     * into the profile's botanical internodes of 1.5-3 cm, that is on the order of
+     * a million internodes -- which is why earlier ceilings of 150,000 and even
+     * 500,000 organs were not safety nets at all: they were terminating growth at
+     * step 39 of 80 and yielding a tree half its target height.
+     *
+     * The fix is NOT simply a bigger ceiling. Quality now sets a longitudinal
+     * detail scale (`internode_scale`) so a draft tree groups its botanical nodes
+     * into far fewer geometric internodes while keeping the same branching
+     * architecture. The ceiling is then a genuine safety net: each level's
+     * expected organ count sits well inside it, and hitting it is still reported.
+     *
+     * The ceiling is therefore stated as a MEMORY budget, since that is what it
+     * actually protects. An Organ is 144 bytes, so:
+     *
+     *   draft      1.4 M organs   ~200 MB    internode scale 7.0
+     *   standard   2.4 M organs   ~345 MB    internode scale 3.0
+     *   high       4.0 M organs   ~576 MB    internode scale 1.6
+     *   reference  6.0 M organs   ~864 MB    internode scale 1.0
+     *
+     * Measured 80-year broadleaf: 0.40 M organs at draft, 0.93 M at standard --
+     * both completing all eighty growth steps with the ceiling untouched. A
+     * 220-year individual is several times larger again and DOES still reach the
+     * ceiling at the finer levels; that limit is documented rather than hidden,
+     * and hit_organ_limit reports it. */
     case QUALITY_DRAFT:
         b.seg_min = 8;  b.seg_max = 20;  b.max_leaves = 2000;
-        b.leaf_tris = 40;   b.bark_feature_m = 0.060f; b.max_organs = 60000; break;
+        b.leaf_tris = 40;   b.bark_feature_m = 0.060f; b.max_organs = 1400000;
+        b.internode_scale = 7.0f; b.order_cap = 32u; break;
     case QUALITY_STANDARD:
         b.seg_min = 12; b.seg_max = 40;  b.max_leaves = 20000;
-        b.leaf_tris = 140;  b.bark_feature_m = 0.024f; b.max_organs = 500000; break;
+        b.leaf_tris = 140;  b.bark_feature_m = 0.024f; b.max_organs = 2400000;
+        b.internode_scale = 3.0f; b.order_cap = 32u; break;
     case QUALITY_HIGH:
         b.seg_min = 18; b.seg_max = 72;  b.max_leaves = 70000;
-        b.leaf_tris = 340;  b.bark_feature_m = 0.011f; b.max_organs = 1600000; break;
+        b.leaf_tris = 340;  b.bark_feature_m = 0.011f; b.max_organs = 4000000;
+        b.internode_scale = 1.6f; b.order_cap = 32u; break;
     case QUALITY_REFERENCE:
     case TREE_QUALITY_COUNT:
     default:
         b.seg_min = 24; b.seg_max = 128; b.max_leaves = 220000;
-        b.leaf_tris = 780;  b.bark_feature_m = 0.005f; b.max_organs = 4000000; break;
+        b.leaf_tris = 780;  b.bark_feature_m = 0.005f; b.max_organs = 6000000;
+        b.internode_scale = 1.0f; b.order_cap = 32u; break;
     }
     return b;
 }
@@ -923,6 +978,18 @@ TgResult tree_profile_resolve(const TreeSettings *settings, TreeResolved *out) {
     out->leaf_triangle_budget = qb.leaf_tris;
     out->bark_feature_size_m = qb.bark_feature_m;
     out->max_organs = qb.max_organs;
+    out->internode_geometry_scale = qb.internode_scale;
+    /* BRANCH ORDER IS ALSO A LEVEL OF DETAIL.
+     *
+     * Longitudinal and circumferential detail can be reduced without changing
+     * which branches exist, but the finest ORDERS cannot: they are structure, and
+     * on a mature broadleaf they are most of the structure by count -- orders 6
+     * through 8 were measured at 25,300 of 46,200 axes. A draft tree that keeps
+     * them cannot complete its growth inside any ceiling a fast preview can
+     * afford, and truncating growth produces a half-height tree, which is a far
+     * worse lie than a complete tree missing its twigs. Draft therefore stops two
+     * orders short and says so. */
+    out->max_branch_order = tg_min_u32(p->max_branch_order, qb.order_cap);
 
     return TG_OK;
 }

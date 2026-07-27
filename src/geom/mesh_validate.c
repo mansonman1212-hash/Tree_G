@@ -309,6 +309,7 @@ static TgResult validate_section_topology(const Mesh *m, MeshSection s,
     total_scratch = edge_bytes + tmp_bytes + parent_bytes + canon_bytes;
     if (total_scratch > opt->max_scratch_bytes) {
         record(r, MESH_ISSUE_SCRATCH_LIMIT, s, total_scratch);
+        r->topology_not_checked = true;
         TG_LOG_ERRORF(MV_SUB,
                       "section '%s': topology check needs %llu scratch bytes, "
                       "limit is %llu; topology NOT verified",
@@ -478,6 +479,7 @@ static TgResult validate_section_topology(const Mesh *m, MeshSection s,
         extra = vol_bytes + ref_bytes + hasref_bytes;
         if (total_scratch + extra > opt->max_scratch_bytes) {
             record(r, MESH_ISSUE_SCRATCH_LIMIT, s, total_scratch + extra);
+            r->topology_not_checked = true;
             result = TG_ERR_LIMIT_EXCEEDED;
             goto cleanup;
         }

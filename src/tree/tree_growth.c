@@ -130,12 +130,233 @@ typedef struct ShootState {
     bool active;          /* apex still capable of extension                 */
     f32  own_light;       /* light reaching this apex this step               */
     f32  gathered;        /* basipetal sum over this axis and its children    */
+    f32  demand;          /* what this apex can actually spend on extension   */
     f32  resource;        /* acropetal allocation this step                   */
     u16  suppressed_steps;
+    /* At the crown surface: alive and photosynthesising, but with nowhere left
+     * to extend into. This is a PAUSE, not a death.
+     *
+     * It used to be a permanent stop, which was wrong in a way that only showed
+     * once the envelope was scaled to the tree's current size: a lateral that
+     * touched the sapling's small crown surface was retired for the remaining
+     * seventy years, so the mature crown could only ever be built by shoots born
+     * near the end. A real crown-surface shoot becomes a SHORT SHOOT -- it keeps
+     * its leaves, holds position, and resumes extending if the crown around it
+     * grows outward or a neighbour dies and opens space. */
+    bool at_surface;
+    bool surface_counted; /* so the diagnostic counts each shoot once         */
+    /* Extension earned but not yet worth a ring of geometry.
+     *
+     * Without this, every living shoot emitted at least one segment per year
+     * however little it grew, so the organ count had a hard floor of
+     * axes x years -- measured at 480,000 for an eighty-year broadleaf, which no
+     * amount of longitudinal coarsening could reduce. A suppressed twig adding
+     * five millimetres a year now accumulates until it has a geometric
+     * internode's worth, which is what makes the level of detail actually scale. */
+    f32  pending_len;
+    u32  pending_nodes;
     u32  node_counter;    /* drives phyllotaxis                              */
     u32  first_child_slot;/* linked list of child shoots, for the passes      */
     u32  next_sibling_slot;
 } ShootState;
+
+/* ------------------------------------------------------------------------- */
+/* Foliage density grid and transmittance                                    */
+/*                                                                           */
+/* WHY THIS REPLACED NEIGHBOUR COUNTING.                                      */
+/*                                                                           */
+/* Self-shading was previously estimated by querying every shoot tip within a  */
+/* radius and counting those in the light hemisphere. At the densities a real   */
+/* skeleton reaches -- around a hundred tips per cubic metre -- that query      */
+/* walks several thousand points, and with twenty thousand active shoots over    */
+/* eighty steps it is billions of operations. Generation appeared to hang.       */
+/*                                                                            */
+/* The replacement is both far cheaper and more defensible: rasterise the tips  */
+/* into a coarse occupancy grid once per step, then march along the light        */
+/* direction accumulating optical depth, Beer-Lambert style. That is O(1) per    */
+/* shoot instead of O(neighbours), and it is an actual transmittance estimate    */
+/* rather than a proxy: it naturally reproduces the vertical gradient (a low     */
+/* interior shoot has the whole crown above it), the directional asymmetry (the  */
+/* shaded side has more crown between it and the light) and interior gaps        */
+/* (a hole in the canopy lets light through), none of which had to be modelled   */
+/* separately.                                                                  */
+/*                                                                            */
+/* It is an approximation and is not called anything more: a single-ray          */
+/* transmittance with a uniform extinction coefficient, no scattering, no        */
+/* spectral dependence. */
+/* ------------------------------------------------------------------------- */
+typedef struct DensityGrid {
+    u32 *cells;
+    f32 *tau;       /* optical depth from each cell to the sky, swept per step */
+    V3   origin;
+    f32  cell;
+    f32  inv_cell;
+    u32  dim[3];
+    u64  cell_count;
+    u64  bytes;
+    u64  tau_bytes;
+} DensityGrid;
+
+static void density_destroy(DensityGrid *d) {
+    if (d == NULL) { return; }
+    if (d->cells != NULL) { tg_free(d->cells, d->bytes); }
+    if (d->tau != NULL) { tg_free(d->tau, d->tau_bytes); }
+    memset(d, 0, sizeof *d);
+}
+
+static TgResult density_create(DensityGrid *d, Aabb bounds, f32 cell) {
+    V3 extent;
+    u64 total;
+
+    memset(d, 0, sizeof *d);
+    if (aabb_is_empty(bounds)) { bounds = aabb_add_point(aabb_empty(), v3_zero()); }
+    bounds = aabb_expand(bounds, cell * 2.0f);
+    extent = aabb_extent(bounds);
+    d->origin = bounds.mn;
+    d->cell = tg_maxf(cell, 1e-3f);
+    d->inv_cell = 1.0f / d->cell;
+    d->dim[0] = tg_clamp_u32((u32)(extent.x * d->inv_cell) + 1u, 1u, 512u);
+    d->dim[1] = tg_clamp_u32((u32)(extent.y * d->inv_cell) + 1u, 1u, 512u);
+    d->dim[2] = tg_clamp_u32((u32)(extent.z * d->inv_cell) + 1u, 1u, 512u);
+    total = (u64)d->dim[0] * d->dim[1] * d->dim[2];
+    if (!tg_ckd_mul_u64(total, sizeof(u32), &d->bytes)) { return TG_ERR_OVERFLOW; }
+    d->cells = (u32 *)tg_alloc_zero(d->bytes);
+    if (d->cells == NULL) { return TG_ERR_OUT_OF_MEMORY; }
+    if (!tg_ckd_mul_u64(total, sizeof(f32), &d->tau_bytes)) {
+        return TG_ERR_OVERFLOW;
+    }
+    d->tau = (f32 *)tg_alloc_zero(d->tau_bytes);
+    if (d->tau == NULL) { return TG_ERR_OUT_OF_MEMORY; }
+    d->cell_count = total;
+    return TG_OK;
+}
+
+static void density_clear(DensityGrid *d) {
+    if (d->cells != NULL) { memset(d->cells, 0, (size_t)d->bytes); }
+    if (d->tau != NULL) { memset(d->tau, 0, (size_t)d->tau_bytes); }
+}
+
+static void density_add(DensityGrid *d, V3 p) {
+    i32 x, y, z;
+    if (d->cells == NULL) { return; }
+    x = (i32)floorf((p.x - d->origin.x) * d->inv_cell);
+    y = (i32)floorf((p.y - d->origin.y) * d->inv_cell);
+    z = (i32)floorf((p.z - d->origin.z) * d->inv_cell);
+    if (x < 0 || y < 0 || z < 0) { return; }
+    if ((u32)x >= d->dim[0] || (u32)y >= d->dim[1] || (u32)z >= d->dim[2]) {
+        return;
+    }
+    d->cells[((u64)z * d->dim[1] + (u64)y) * d->dim[0] + (u64)x]++;
+}
+
+
+/* Extinction per unit shoot-tip density, m^2 per tip. Calibrated by measurement,
+ * not chosen: at this value a shoot buried in a fully occupied crown falls below
+ * the profile's light_death_threshold within its suppression tolerance, while a
+ * shoot on the crown surface stays comfortably above it. */
+#ifndef TG_FOLIAGE_EXTINCTION
+#define TG_FOLIAGE_EXTINCTION 0.055f
+#endif
+
+/* Index of the cell containing `p`, or U32 max if outside. */
+static u32 density_index(const DensityGrid *d, V3 p) {
+    i32 x, y, z;
+    if (d->cells == NULL) { return 0xFFFFFFFFu; }
+    x = (i32)floorf((p.x - d->origin.x) * d->inv_cell);
+    y = (i32)floorf((p.y - d->origin.y) * d->inv_cell);
+    z = (i32)floorf((p.z - d->origin.z) * d->inv_cell);
+    if (x < 0 || y < 0 || z < 0) { return 0xFFFFFFFFu; }
+    if ((u32)x >= d->dim[0] || (u32)y >= d->dim[1] || (u32)z >= d->dim[2]) {
+        return 0xFFFFFFFFu;
+    }
+    return (u32)(((u64)z * d->dim[1] + (u64)y) * d->dim[0] + (u64)x);
+}
+
+/* OPTICAL DEPTH BY PROPAGATION, NOT BY MARCHING.
+ *
+ * The light direction is fixed for the whole tree, so the optical depth from a
+ * point to the sky is a FIELD over the grid and can be swept once per step
+ * instead of integrated once per shoot. This is the shadow-propagation idea from
+ * Palubicki et al., "Self-organizing tree models for image synthesis" (2009),
+ * applied to a Beer-Lambert extinction rather than their discrete penalty.
+ *
+ * WHY IT MATTERS, MEASURED: marching per shoot cost 49 grid samples for every
+ * live apex on every step. On a 220-year individual -- some 200,000 live apices
+ * over 220 steps -- that is on the order of two BILLION samples and generation
+ * exceeded two minutes. The sweep costs one pass over the grid, which for the
+ * same tree is about 26,000 cells, and turns every light query into a single
+ * lookup.
+ *
+ * The sweep visits cells in order of decreasing depth along the light direction,
+ * so tau(p) = tau(p + dir*t) + extinction * density(p) * t always reads a cell
+ * that is already final. Iterating along the direction's DOMINANT axis guarantees
+ * that ordering for any direction. */
+static void density_propagate(DensityGrid *d, V3 dir, f32 extinction) {
+    u32 ax = 0;
+    f32 mag[3];
+    f32 step, cell_volume;
+    i32 slice, first, last, delta;
+    u32 u, v, du, dv;
+
+    if (d->cells == NULL || d->tau == NULL) { return; }
+    mag[0] = tg_absf(dir.x); mag[1] = tg_absf(dir.y); mag[2] = tg_absf(dir.z);
+    if (mag[1] >= mag[0] && mag[1] >= mag[2])      { ax = 1; }
+    else if (mag[2] >= mag[0] && mag[2] >= mag[1]) { ax = 2; }
+    if (!(mag[ax] > 1e-4f)) {
+        memset(d->tau, 0, (size_t)d->cell_count * sizeof d->tau[0]);
+        return;
+    }
+    /* Ray length that advances exactly one cell along the dominant axis. */
+    step = d->cell / mag[ax];
+    cell_volume = d->cell * d->cell * d->cell;
+
+    /* Sweep from the lit boundary inward, so the cell one step toward the light
+     * is always already resolved. */
+    {
+        f32 comp = (ax == 0) ? dir.x : (ax == 1 ? dir.y : dir.z);
+        if (comp > 0.0f) { first = (i32)d->dim[ax] - 1; last = -1; delta = -1; }
+        else             { first = 0; last = (i32)d->dim[ax]; delta = 1; }
+    }
+    du = d->dim[(ax + 1u) % 3u];
+    dv = d->dim[(ax + 2u) % 3u];
+
+    for (slice = first; slice != last; slice += delta) {
+        for (v = 0; v < dv; ++v) {
+            for (u = 0; u < du; ++u) {
+                u32 idx3[3];
+                u32 here, ahead;
+                V3 centre;
+                f32 tau_ahead;
+                idx3[ax] = (u32)slice;
+                idx3[(ax + 1u) % 3u] = u;
+                idx3[(ax + 2u) % 3u] = v;
+                here = (idx3[2] * d->dim[1] + idx3[1]) * d->dim[0] + idx3[0];
+                centre = v3_add(d->origin,
+                               v3(((f32)idx3[0] + 0.5f) * d->cell,
+                                  ((f32)idx3[1] + 0.5f) * d->cell,
+                                  ((f32)idx3[2] + 0.5f) * d->cell));
+                ahead = density_index(d, v3_add(centre, v3_scale(dir, step)));
+                tau_ahead = (ahead == 0xFFFFFFFFu) ? 0.0f : d->tau[ahead];
+                d->tau[here] = tau_ahead
+                             + extinction * ((f32)d->cells[here] / cell_volume)
+                               * step;
+            }
+        }
+    }
+}
+
+/* Transmittance reaching `pos`. The lookup deliberately samples ONE STEP along
+ * the light direction rather than the containing cell, so a shoot is not shaded
+ * by its own tip. */
+static f32 density_transmittance(const DensityGrid *d, V3 pos, V3 dir) {
+    f32 mag = tg_maxf(tg_maxf(tg_absf(dir.x), tg_absf(dir.y)),
+                      tg_absf(dir.z));
+    u32 idx;
+    if (d->tau == NULL || !(mag > 1e-4f)) { return 1.0f; }
+    idx = density_index(d, v3_add(pos, v3_scale(dir, d->cell / mag)));
+    if (idx == 0xFFFFFFFFu) { return 1.0f; }
+    return expf(-d->tau[idx]);
+}
 
 typedef struct GrowthCtx {
     TreeGraph          *graph;
@@ -144,10 +365,8 @@ typedef struct GrowthCtx {
     TgArray             shoots;      /* ShootState, indexed by axis id        */
     SpatialGrid         attractors;
     AttractorCloud      cloud;
-    /* Occupancy grid over existing shoot tips, rebuilt each step. Used for the
-     * local-density term of the light estimate. */
-    TgArray             tip_positions; /* V3                                  */
-    SpatialGrid         tips;
+    /* Foliage occupancy, rebuilt each step, used for the transmittance estimate. */
+    DensityGrid         density;
     GrowthResult       *result;
     u16                 step;
     /* The tree's CURRENT extent, refreshed every step. Light must be judged
@@ -177,6 +396,8 @@ static TgResult shoot_add(GrowthCtx *c, u32 axis) {
     memset(&s, 0, sizeof s);
     s.axis = axis;
     s.active = true;
+    s.at_surface = false;
+    s.surface_counted = false;
     s.first_child_slot = TG_INVALID_ID;
     s.next_sibling_slot = TG_INVALID_ID;
     /* Axis ids are dense and increasing, so the shoot array stays index-aligned
@@ -199,108 +420,66 @@ static TgResult shoot_add(GrowthCtx *c, u32 axis) {
  * apex rather than the apex itself -- see the call site for why. */
 static f32 estimate_light(GrowthCtx *c, V3 pos, u32 order) {
     const TreeResolved *r = c->r;
-    f32 vertical, directional, density;
+    f32 transmittance, neighbour, order_penalty, light;
 
-    /* 1. Vertical exposure, measured against the tree's CURRENT height. Foliage
-     *    above shades foliage below, so the apex of a tree of any age is by
-     *    definition the most exposed point on it. Using the eventual target
-     *    height here instead is a genuine modelling error: it makes every shoot
-     *    on a young tree read as shaded and self-prunes the leader. */
-    vertical = tg_remap01f(pos.y, 0.0f, tg_maxf(c->current_height, 0.2f));
-    vertical = 0.25f + 0.75f * vertical;
+    /* 1. Transmittance toward the light through the tree's own foliage. This one
+     *    term subsumes what used to be three separate heuristics -- a vertical
+     *    exposure ramp, a directional side bias and a neighbour count -- and does
+     *    so with an actual optical-depth integral rather than proxies. */
+    transmittance = density_transmittance(&c->density, pos,
+                                          r->settings.environment.light_direction);
 
-    /* 2. Directional exposure. How far the shoot sits toward the illuminated
-     *    side of the crown. This is what makes asymmetry causal rather than
-     *    decorative. */
-    {
-        V3 radial = v3(pos.x, 0.0f, pos.z);
-        f32 dist = v3_len(radial);
-        /* Current spread, for the same reason as the height above. */
-        f32 env = tg_maxf(c->current_spread, 0.05f);
-        f32 outwardness = tg_saturatef(dist / env);
-        f32 align = 0.5f;
-        if (dist > 1e-4f) {
-            align = 0.5f + 0.5f * v3_dot(v3_scale(radial, 1.0f / dist),
-                                         r->crown_offset_dir);
-        }
-        directional = tg_lerpf(1.0f,
-                               tg_lerpf(0.35f, 1.0f, align),
-                               r->settings.environment.light_anisotropy)
-                    /* Interior shoots receive less regardless of side. */
-                    * tg_lerpf(0.55f, 1.0f, outwardness);
-    }
-
-    /* 3. DIRECTIONAL self-shading. Only foliage that lies BETWEEN the shoot and
-     *    the light shades it.
-     *
-     *    An earlier version counted every neighbouring tip within the influence
-     *    radius. That was measured to be wrong in a way that destroyed the model:
-     *    a shoot's own parent and siblings are always nearby, so the baseline
-     *    occlusion was high everywhere, every interior shoot fell below the
-     *    mortality threshold, and the tree never reached a second branch order.
-     *    Worse, the mortality that did occur had no height bias -- it was not
-     *    shade driven at all.
-     *
-     *    Counting only occluders in the light hemisphere gives the apex an
-     *    unshaded value and the lower interior a heavily shaded one, which is
-     *    both physically right and what produces crown lift, interior gaps and
-     *    lower-branch death. */
-    {
-        u32 buf[256];
-        u32 count = 0, total = 0;
-        u32 occluders = 0;
-        f32 radius = tg_maxf(c->p->influence_radius_m * 1.2f, 0.05f);
-        f32 inner = radius * 0.15f;
-        V3 light_dir = r->settings.environment.light_direction;
-        u32 k;
-
-        (void)spatial_query_radius(&c->tips, pos, radius, buf,
-                                   (u32)TG_COUNTOF(buf), &count, &total);
-        for (k = 0; k < count; ++k) {
-            V3 d = v3_sub(((const V3 *)c->tip_positions.data)[buf[k]], pos);
-            f32 len = v3_len(d);
-            /* Ignore immediate neighbours: those are the shoot's own axis and
-             * its siblings at the same node, which do not shade it. */
-            if (len < inner) { continue; }
-            if (v3_dot(d, light_dir) > 0.30f * len) { occluders++; }
-        }
-        /* If the query truncated, scale the directional count up in proportion
-         * rather than under-reporting occlusion. Stated explicitly because a
-         * silent undercount would look like a healthy crown. */
-        if (total > count && count > 0) {
-            occluders = (u32)((f32)occluders * (f32)total / (f32)count);
-        }
-
-        density = 1.0f / (1.0f + 0.16f * (f32)occluders);
-        /* Shade tolerance softens the penalty rather than removing it: blending
-         * toward sqrt compresses the range while preserving the ordering, so a
-         * tolerant profile still suffers from crowding, just less. */
-        density = tg_lerpf(density, sqrtf(density), c->p->shade_tolerance);
-    }
-
-    /* 4. NEIGHBOUR shading from the surrounding stand.
-     *
-     * Terms 1-3 model the tree shading itself. Without this fourth term,
-     * canopy_closure changed only the crown's GEOMETRY, and a forest tree -- with
-     * its narrow, lifted crown -- ended up suffering LESS self-shading than an
-     * open-grown one. The measured dead fraction came out lower in the forest
-     * than in the open, which is backwards.
-     *
-     * Neighbours block lateral light while overhead light still reaches the top,
-     * so the penalty is strongest low in the crown and vanishes at the apex. This
-     * is the mechanism that lifts a forest tree's live crown and cleans its bole. */
+    /* 2. Neighbour shading from the surrounding stand. Terms above model the tree
+     *    shading itself; canopy closure blocks lateral light while overhead light
+     *    still reaches the top, so the penalty is strongest low in the crown and
+     *    vanishes at the apex. This is the mechanism that lifts a forest tree's
+     *    live crown and cleans its bole. */
     {
         f32 closure = tg_saturatef(r->settings.environment.canopy_closure);
         f32 relative_height = tg_remap01f(pos.y, 0.0f,
                                           tg_maxf(c->current_height, 0.2f));
         f32 exposed_above = relative_height * relative_height;
-        f32 neighbour = tg_lerpf(1.0f, tg_lerpf(0.12f, 1.0f, exposed_above),
-                                 closure);
-        /* Higher orders sit deeper inside foliage on average. */
-        f32 order_penalty = 1.0f - 0.06f * (f32)tg_min_u32(order, 5);
-        f32 light = vertical * directional * density * neighbour * order_penalty;
-        return tg_saturatef(light);
+        neighbour = tg_lerpf(1.0f, tg_lerpf(0.12f, 1.0f, exposed_above), closure);
     }
+
+    /* 3. Higher orders sit deeper inside foliage on average. */
+    order_penalty = 1.0f - 0.06f * (f32)tg_min_u32(order, 5);
+
+    /* A floor representing diffuse sky light reaching even a shaded shoot: without
+     * it a deep interior shoot receives exactly zero and the whole interior dies,
+     * which is not what happens in a real crown. */
+    light = (0.10f + 0.90f * transmittance) * neighbour * order_penalty;
+    /* Shade tolerance lifts the floor rather than removing the gradient. */
+    light = tg_lerpf(light, sqrtf(tg_saturatef(light)), c->p->shade_tolerance);
+    return tg_saturatef(light);
+}
+
+/* ------------------------------------------------------------------------- */
+/* Crown envelope, scaled to the tree the shoot is actually growing on        */
+/*                                                                           */
+/* The resolved envelope describes the MATURE crown. Testing a shoot against it  */
+/* directly asks a two-metre sapling to keep its branches inside a crown whose   */
+/* base sits at five metres and whose surface is nine metres out. Measured        */
+/* consequence: every lateral below the mature crown base was retired on its      */
+/* first node from year one, so the tree grew a bare pole for decades and the      */
+/* crown could only ever be assembled at the very top -- which is precisely what  */
+/* the first rendered captures showed.                                            */
+/*                                                                             */
+/* The envelope is therefore scaled SELF-SIMILARLY to the height the tree has     */
+/* reached, so a young tree carries a young tree's crown. The clean bole of a      */
+/* mature tree is then produced by the mechanism that actually produces it in the  */
+/* field -- the lower branches grow, are overtopped, and are shed -- rather than   */
+/* by forbidding them to exist.                                                   */
+/* ------------------------------------------------------------------------- */
+static f32 envelope_now(const GrowthCtx *c, const TreeResolved *r, f32 y) {
+    f32 dev = tg_clampf(c->current_height / tg_maxf(r->height_m, 0.01f),
+                        0.05f, 1.0f);
+    f32 rr = tree_resolved_envelope_radius(r, tg_minf(y / dev, r->height_m)) * dev;
+    /* A floor of half the influence radius. Without it the envelope tapers to
+     * zero at the very apex and pinches off the leading shoots of a small tree,
+     * and no crown -- however young -- is narrower than the space a single shoot
+     * competes over. */
+    return tg_maxf(rr, c->p->influence_radius_m * 0.5f);
 }
 
 /* ------------------------------------------------------------------------- */
@@ -395,14 +574,14 @@ static void distribute_acropetal(GrowthCtx *c, f32 total_budget) {
             q_children += shoot_of(c, j)->gathered;
         }
 
-        denom = lambda * s->own_light + (1.0f - lambda) * q_children;
+        denom = lambda * s->demand + (1.0f - lambda) * q_children;
         if (!(denom > 1e-9f)) {
             /* Nothing is gathering light anywhere below here. Keep the resource
              * at the apex rather than dividing by zero. */
             s->resource = v;
             continue;
         }
-        s->resource = v * (lambda * s->own_light) / denom;
+        s->resource = v * (lambda * s->demand) / denom;
         for (j = s->first_child_slot; j != TG_INVALID_ID;
              j = shoot_of(c, j)->next_sibling_slot) {
             shoot_of(c, j)->resource +=
@@ -444,8 +623,11 @@ static V3 colonization_direction(GrowthCtx *c, V3 pos, u32 *out_found) {
     return sum;
 }
 
+/* `turn_scale` divides the per-year angular budget among the nodes of one annual
+ * shoot, so subdividing a flush does not multiply how far a shoot can turn in a
+ * year. */
 static V3 next_direction(GrowthCtx *c, const Axis *axis, V3 pos, V3 current,
-                         u32 order, TgRng *rng) {
+                         u32 order, TgRng *rng, f32 turn_scale) {
     V3 desired;
     V3 colon;
     u32 found = 0;
@@ -505,12 +687,14 @@ static V3 next_direction(GrowthCtx *c, const Axis *axis, V3 pos, V3 current,
      * segmented arc built from many small corrections -- the shape real shoots
      * have -- instead of a smooth constant-radius sweep. */
     {
-        f32 budget = c->p->max_turn_per_step * tg_lerpf(0.5f, 1.0f, grav);
+        f32 budget = c->p->max_turn_per_step * tg_lerpf(0.5f, 1.0f, grav)
+                   * tg_clampf(turn_scale, 0.02f, 1.0f);
         V3 turned = v3_rotate_toward(current, desired, budget);
         /* Small isotropic wander so two shoots in identical circumstances do not
          * grow identically. Deliberately small: individuality comes from history,
          * not from noise. */
-        f32 wander = 0.06f * tg_lerpf(1.0f, 2.0f, tg_saturatef((f32)order / 4.0f));
+        f32 wander = 0.06f * tg_lerpf(1.0f, 2.0f, tg_saturatef((f32)order / 4.0f))
+                   * tg_clampf(turn_scale, 0.02f, 1.0f);
         turned = tg_rng_cone(rng, turned, wander);
         return v3_norm_or(turned, current);
     }
@@ -562,11 +746,13 @@ static u32 buds_per_node(const TreeProfile *p, u32 order) {
  * at one node, which is what gives a conifer its regular branch layers. Rauh
  * breaks buds individually, giving an irregular decurrent crown. Both fall out of
  * the same function because the profile says which architecture applies. */
+/* `acrotony` is the node's position within its own annual shoot: 0 at the base of
+ * the increment, 1 at its distal end. */
 static bool should_break_bud(GrowthCtx *c, u32 order, f32 light,
-                             u32 node_index, TgRng *rng) {
+                             u32 node_index, f32 acrotony, TgRng *rng) {
     f32 chance;
 
-    if (order + 1u > c->p->max_branch_order) { return false; }
+    if (order + 1u > c->r->max_branch_order) { return false; }
     if (c->graph->organs.count + 8u >= c->shoot_organ_budget) { return false; }
 
     /* Driven by LIGHT AT THE BUD, not by the resource allocation.
@@ -590,11 +776,18 @@ static bool should_break_bud(GrowthCtx *c, u32 order, f32 light,
          * breaks at all, which is what keeps the shaded interior sparse. */
         f32 lit = tg_smoothstepf(c->p->light_death_threshold,
                                  c->p->light_death_threshold + 0.45f, light);
-        /* Calibrated by measuring the resulting self-shading mortality: at
-         * 0.30 the broadleaf crown became crowded enough that 43% of shoot
-         * segments died, which is a stressed tree, not a typical one. */
-        chance = 0.26f * lit;
+        /* Per BUD, and there are now several buds per annual shoot rather than
+         * one, so the per-bud rate is correspondingly lower than the per-year
+         * rate it replaced. */
+        chance = 0.22f * lit;
     }
+    /* ACROTONY. Laterals break preferentially from the DISTAL nodes of a shoot,
+     * which is why a real branch carries its side branches toward its far end and
+     * why the proximal part of each annual increment stays comparatively clean.
+     * A flat probability across the shoot spreads side branches evenly and reads
+     * as a diagram. The square keeps the bias strong without forbidding the
+     * occasional proximal break. */
+    chance *= 0.10f + 0.90f * acrotony * acrotony;
     /* Deeper orders branch less: the crown gets finer, not self-similar. */
     chance *= tg_lerpf(1.0f, 0.55f, tg_saturatef((f32)order / 4.0f));
     /* Rhythm: no lateral may break on every node of a flush. */
@@ -609,13 +802,14 @@ static bool should_break_bud(GrowthCtx *c, u32 order, f32 light,
 /* Tip occupancy grid                                                        */
 /* ------------------------------------------------------------------------- */
 
-static TgResult rebuild_tip_grid(GrowthCtx *c) {
+static TgResult rebuild_density(GrowthCtx *c) {
     u32 i, n;
+    Aabb bounds = aabb_empty();
 
-    tg_array_clear(&c->tip_positions);
     c->current_height = 0.0f;
     c->current_spread = 0.0f;
     n = tree_graph_organ_count(c->graph);
+
     for (i = 0; i < n; ++i) {
         const Organ *o = tree_graph_organ(c->graph, i);
         V3 tip;
@@ -628,16 +822,55 @@ static TgResult rebuild_tip_grid(GrowthCtx *c) {
             f32 rad = v3_len(v3(tip.x, 0.0f, tip.z));
             if (rad > c->current_spread) { c->current_spread = rad; }
         }
-        {
-            TgResult r = tg_array_push(&c->tip_positions, &tip, NULL);
-            if (r != TG_OK) { return r; }
+        bounds = aabb_add_point(bounds, tip);
+    }
+
+    /* The grid is sized to the CURRENT tree and rebuilt when the tree has grown
+     * past it, rather than reallocated every step. Cell size is a fraction of the
+     * influence radius: fine enough to resolve a crown gap, coarse enough that the
+     * march is a few dozen samples. */
+    {
+        f32 cell = tg_maxf(c->p->influence_radius_m * 0.55f, 0.15f);
+        bool need_new = (c->density.cells == NULL);
+        if (!need_new) {
+            V3 mn = c->density.origin;
+            V3 mx = v3_add(mn, v3((f32)c->density.dim[0] * c->density.cell,
+                                  (f32)c->density.dim[1] * c->density.cell,
+                                  (f32)c->density.dim[2] * c->density.cell));
+            if (!aabb_is_empty(bounds) &&
+                (bounds.mn.x < mn.x || bounds.mn.y < mn.y || bounds.mn.z < mn.z ||
+                 bounds.mx.x > mx.x || bounds.mx.y > mx.y || bounds.mx.z > mx.z)) {
+                need_new = true;
+            }
+        }
+        if (need_new) {
+            Aabb padded = aabb_expand(aabb_is_empty(bounds)
+                                          ? aabb_add_point(aabb_empty(), v3_zero())
+                                          : bounds,
+                                      tg_maxf(c->r->crown_width_m * 0.35f, 1.0f));
+            TgResult res;
+            density_destroy(&c->density);
+            res = density_create(&c->density, padded, cell);
+            if (res != TG_OK) { return res; }
+        } else {
+            density_clear(&c->density);
         }
     }
-    spatial_destroy(&c->tips);
-    return spatial_build(&c->tips, (const V3 *)c->tip_positions.data,
-                         (u32)c->tip_positions.count,
-                         tg_maxf(c->p->influence_radius_m * 0.8f, 0.05f),
-                         1u << 21);
+
+    for (i = 0; i < n; ++i) {
+        const Organ *o = tree_graph_organ(c->graph, i);
+        if (!organ_type_is_segment((OrganType)o->type)) { continue; }
+        if (o->type == ORGAN_ROOT_SEGMENT) { continue; }
+        if ((o->flags & ORGAN_FLAG_DEAD) != 0) { continue; }
+        density_add(&c->density, organ_tip(o));
+    }
+    /* One sweep now serves every light query this step. The extinction
+     * coefficient is per unit tip density, calibrated so a shoot deep inside a
+     * fully occupied crown falls below the profile's mortality threshold while a
+     * shoot on the crown surface stays well above it. */
+    density_propagate(&c->density, c->r->settings.environment.light_direction,
+                      TG_FOLIAGE_EXTINCTION);
+    return TG_OK;
 }
 
 /* ------------------------------------------------------------------------- */
@@ -646,9 +879,8 @@ static TgResult rebuild_tip_grid(GrowthCtx *c) {
 
 static void ctx_destroy(GrowthCtx *c) {
     tg_array_free(&c->shoots);
-    tg_array_free(&c->tip_positions);
     spatial_destroy(&c->attractors);
-    spatial_destroy(&c->tips);
+    density_destroy(&c->density);
     tree_growth_free_attractors(&c->cloud);
 }
 
@@ -695,8 +927,6 @@ TgResult tree_growth_run(TreeGraph *graph, const TreeResolved *resolved,
 
     r = TG_ARRAY_INIT(&c.shoots, ShootState, 256, "growth.shoots");
     if (r != TG_OK) { goto done; }
-    r = TG_ARRAY_INIT(&c.tip_positions, V3, 1024, "growth.tips");
-    if (r != TG_OK) { goto done; }
 
     r = tree_growth_build_attractors(resolved, &c.cloud);
     if (r != TG_OK) { goto done; }
@@ -739,7 +969,7 @@ TgResult tree_growth_run(TreeGraph *graph, const TreeResolved *resolved,
         st.step = step;
         c.step = step;
 
-        r = rebuild_tip_grid(&c);
+        r = rebuild_density(&c);
         if (r != TG_OK) { goto done; }
 
         /* 1. light for every active apex */
@@ -748,6 +978,24 @@ TgResult tree_growth_run(TreeGraph *graph, const TreeResolved *resolved,
             ShootState *s = shoot_of(&c, i);
             const Axis *a = tree_graph_axis(graph, i);
             if (!s->active) { s->own_light = 0.0f; continue; }
+            /* Re-tested every step against the CURRENT envelope: a shoot held at
+             * the crown surface last year is released as soon as the crown grows
+             * out past it. */
+            s->at_surface = false;
+            if (a->order > 0) {
+                f32 env = envelope_now(&c, &r_local, a->tip_position.y);
+                f32 radial = v3_len(v3(a->tip_position.x, 0.0f,
+                                       a->tip_position.z));
+                if (radial > env * 1.05f) {
+                    s->at_surface = true;
+                    if (!s->surface_counted) {
+                        s->surface_counted = true;
+                        if (out_result != NULL) {
+                            out_result->stopped_by_envelope++;
+                        }
+                    }
+                }
+            }
             /* Sample the space the shoot is GROWING INTO, not the point it
              * currently occupies.
              *
@@ -764,8 +1012,17 @@ TgResult tree_growth_run(TreeGraph *graph, const TreeResolved *resolved,
                                            c.p->influence_radius_m * 0.6f));
                 s->own_light = estimate_light(&c, ahead, a->order);
             }
+            /* A shoot pinned at the crown surface makes NO DEMAND on the
+             * resource stream: it cannot spend an allocation on extension, so its
+             * share passes through the Borchert-Honda partition to its laterals
+             * instead of being allocated and discarded. Its leaves still feed the
+             * tree, which is why `gathered` uses own_light regardless. */
+            s->demand = s->at_surface ? 0.0f : s->own_light;
             st.total_light += s->own_light;
-            st.active_shoots++;
+            /* Only extending shoots scale the extension budget. Counting pinned
+             * shoots here inflated the budget without adding anywhere to spend
+             * it. */
+            if (!s->at_surface) { st.active_shoots++; }
         }
 
         /* 2. resource passes */
@@ -819,6 +1076,7 @@ TgResult tree_growth_run(TreeGraph *graph, const TreeResolved *resolved,
                                                     ORGAN_FLAG_BARK_RETAINED);
                     }
                     s->active = false;
+                    if (out_result != NULL) { out_result->stopped_by_shade++; }
                     continue;
                 }
                 /* Suppressed but alive: extends very little. */
@@ -827,9 +1085,19 @@ TgResult tree_growth_run(TreeGraph *graph, const TreeResolved *resolved,
                 s->suppressed_steps--;
             }
 
+            /* Pinned at the crown surface: alive, still shading its neighbours,
+             * still subject to the mortality test above (which is why this check
+             * sits AFTER it -- a low branch left behind by an expanding crown must
+             * still be shed once the crown closes over it), but with nowhere to
+             * put an internode this year. */
+            if (s->at_surface) { continue; }
+
             /* A shoot with essentially no resource simply does not extend this
              * step. It is not dead: it may recover if a neighbour dies. */
-            if (res < 0.010f) { continue; }
+            if (res < 0.010f) {
+                if (out_result != NULL) { out_result->starved_steps++; }
+                continue;
+            }
 
             if (tree_graph_organ_count(graph) + 4u >= c.shoot_organ_budget) {
                 if (out_result != NULL) { out_result->hit_organ_limit = true; }
@@ -848,22 +1116,15 @@ TgResult tree_growth_run(TreeGraph *graph, const TreeResolved *resolved,
              * horizontally until the crown was twice as wide as tall and the
              * conifer came out as a bush.
              *
-             * The trunk is exempt from the radial limit (it lives below the live
-             * crown by definition) but is capped in height, which also removes
-             * the leader's ability to overshoot the target. */
+             * Reaching the surface is a PAUSE (`at_surface`, tested above), not a
+             * death. Reaching the target HEIGHT is different: the height curve is
+             * the tree's realised size, and a leader that passes it has finished.
+             * The trunk is exempt from the radial limit -- it lives below the live
+             * crown by definition. */
             if (pos.y >= r_local.height_m) {
                 s->active = false;
+                if (out_result != NULL) { out_result->stopped_by_height++; }
                 continue;
-            }
-            if (order > 0) {
-                f32 env = tree_resolved_envelope_radius(&r_local, pos.y);
-                f32 radial = v3_len(v3(pos.x, 0.0f, pos.z));
-                /* 5% slack so a shoot may just reach the surface rather than
-                 * stopping short of it. */
-                if (radial > env * 1.05f) {
-                    s->active = false;
-                    continue;
-                }
             }
 
             rng_dir = tg_rng_substream(resolved->settings.seed,
@@ -871,203 +1132,394 @@ TgResult tree_growth_run(TreeGraph *graph, const TreeResolved *resolved,
             rng_bud = tg_rng_substream(resolved->settings.seed,
                                        TG_RNG_BUD_FATE, i, step);
 
-            dir = next_direction(&c, axis_snapshot, pos, dir, order, &rng_dir);
-
-            /* Internode length from the profile, modulated by resource. Longer
-             * internodes on vigorous shoots and short congested ones on weak
-             * shoots is a real and highly visible signal of growing conditions. */
+            /* ONE FLUSH PRODUCES AN ANNUAL SHOOT OF SEVERAL NODES.
+             *
+             * The annual extension comes from the profile, which is what keeps
+             * the growth model consistent with the height curve; the flush divides
+             * it into that order's node count. Each node gets its own bounded
+             * direction correction, so one year's growth is a short segmented arc
+             * rather than a single straight stick -- and, far more consequentially,
+             * every node is a branching opportunity.
+             *
+             * Treating one internode as one year gave each shoot exactly one
+             * chance to branch per year. Measured result: 423 of 825 axes born in
+             * the final tenth of the tree's life with a mean length of 0.23 m,
+             * which rendered as a bare pole with a tuft on top. */
             {
-                f32 base = tree_resolved_internode_length(resolved, order);
-                TgRng rng_len = tg_rng_substream(resolved->settings.seed,
-                                                 TG_RNG_INTERNODE_LENGTH, i, step);
-                f32 vary = 1.0f + tg_rng_signed(&rng_len)
-                                  * c.p->internode_length_spread;
-                /* Annual extension DECLINES WITH AGE, following the derivative of
-                 * the height curve rather than staying constant.
-                 *
-                 * This is what makes the growth model and the resolved height
-                 * model agree by construction: with h(t) = H(1 - exp(-t/k)), the
-                 * increment is (H/k)exp(-t/k), so summing the leader's internodes
-                 * over the whole history reproduces the target height exactly. A
-                 * constant internode length made a 60-year tree 29.7 m tall
-                 * against a 16.1 m target -- a real inconsistency between two
-                 * parts of the same model, not a tuning nuisance. */
-                /* The decay clock runs on the AXIS's OWN AGE, not the tree's.
-                 *
-                 * A branch that breaks in year 40 begins its own juvenile phase
-                 * then; it does not inherit the trunk's already-exhausted vigour.
-                 * Using the tree's age for laterals was measured to hold the
-                 * broadleaf crown to a 5.2 m radius against a 9.6 m envelope,
-                 * because every branch born late was extending at the leader's
-                 * old-age rate from the moment it appeared. Laterals also mature
-                 * faster than the trunk, hence the shorter time constant. */
+                u32 nodes_full = tg_clamp_u32(
+                    c.p->nodes_per_flush[tg_min_u32(order, 9u)], 1u, 40u);
+                f32 annual = tree_resolved_internode_length(resolved, order);
                 f32 own_age = (f32)step - (f32)axis_snapshot->created_step;
-                f32 k_axis = (order == 0) ? c.age_decay_k : c.age_decay_k * 0.55f;
+                f32 k_axis = (order == 0) ? c.age_decay_k
+                                          : c.age_decay_k * 0.55f;
                 f32 decay = expf(-tg_maxf(own_age, 0.0f) / k_axis);
-                /* res ~= 1 is the nominal allocation, so the response is centred
-                 * there: a well-supplied shoot extends a full internode and a
-                 * starved one a short congested fraction of it. */
-                f32 len = base * decay
-                        * tg_clampf(0.45f + res * 0.55f, 0.30f, 1.5f) * vary;
-                len = tg_maxf(len, base * decay * 0.15f);
+                f32 vigour = tg_clampf(0.45f + res * 0.55f, 0.30f, 1.5f);
+                /* LONG SHOOTS AND SHORT SHOOTS.
+                 *
+                 * The node COUNT follows vigour; the internode LENGTH does not.
+                 * This is the auxoblast/brachyblast distinction and it is not a
+                 * refinement -- it was the single largest defect in the whole
+                 * skeleton.
+                 *
+                 * Holding the count at the profile maximum while the annual
+                 * increment decayed as exp(-age/k) forced the internode length to
+                 * collapse instead. Measured, on an eighty-year broadleaf: order-4
+                 * axes averaged 0.351 m of length spread over 41.2 internodes --
+                 * 8.5 MILLIMETRES each -- and order-2 axes 1.93 m over 109.9. That
+                 * is not a tree, it is a tree finely diced: 1.24 million segments
+                 * of which perhaps a quarter carried any shape information, the
+                 * organ ceiling exhausted at step 63 of 80, and a tree that
+                 * reached 10.7 m of its 18.8 m target and rendered as a bare pole
+                 * under a flat pancake of twigs.
+                 *
+                 * Deriving the count from the increment keeps the internode at the
+                 * length the profile actually specifies (annual / nodes_full, i.e.
+                 * 1.5 to 4 cm depending on order) and lets a weakening shoot do
+                 * what a weakening shoot does: produce fewer, not shorter,
+                 * internodes, until it is making one short internode a year. Total
+                 * axis length is unchanged -- the same annual increment is divided
+                 * by a smaller count -- so the height curve still integrates
+                 * correctly. */
+                /* THE LEADER IS DRIVEN BY THE RESOLVED HEIGHT CURVE.
+                 *
+                 * Laterals have no externally specified target, so their extension
+                 * is the profile increment modulated by vigour. The trunk does have
+                 * one -- the resolved individual's height -- and letting it emerge
+                 * from the same product of profile constant, age decay and a
+                 * clamped vigour meant the two agreed only by luck. Measured, they
+                 * did not: the leader integrated to 16.69 m against a resolved
+                 * target of 18.79 m, and it got that close only because vigour sat
+                 * pinned at its 1.5 ceiling for most of the tree's life, so the
+                 * shortfall was silently sensitive to a clamp.
+                 *
+                 * Instead the leader tracks the height curve directly: its arc
+                 * length after t steps is the resolved height (corrected for lean)
+                 * times the same normalised 1-exp(-t/k) the resolution pass used.
+                 * The annual increment is then the DIFFERENCE between this step's
+                 * target and the length already built, which self-corrects -- a
+                 * year lost to suppression is made up later, exactly as a released
+                 * tree does, and the final height matches the specification by
+                 * construction. Realised height still differs slightly from arc
+                 * length because the leader curves and then sags, and that
+                 * difference is reported rather than compensated. */
+                f32 increment;
+                f32 target_internode = annual / (f32)nodes_full;
 
-                r = tree_graph_add_segment(graph, i,
-                                           order == 0 ? ORGAN_TRUNK_SEGMENT
-                                                      : (order >= 3
-                                                            ? ORGAN_TWIG_SEGMENT
-                                                            : ORGAN_BRANCH_SEGMENT),
-                                           pos, dir, len, step, &new_organ);
-                if (r == TG_ERR_LIMIT_EXCEEDED) {
-                    if (out_result != NULL) { out_result->hit_organ_limit = true; }
-                    s->active = false;
-                    r = TG_OK;
+                if (order == 0u) {
+                    f32 k = c.age_decay_k;
+                    f32 total = (f32)tg_max_u32(r_local.growth_steps, 1u);
+                    f32 span = 1.0f - expf(-total / k);
+                    f32 lean_cos = tg_maxf(cosf(r_local.lean_angle_rad), 0.5f);
+                    f32 final_len = r_local.height_m / lean_cos;
+                    f32 want = (span > 1e-6f)
+                                 ? final_len * (1.0f - expf(-((f32)step + 1.0f) / k))
+                                       / span
+                                 : final_len;
+                    increment = tg_maxf(want - axis_snapshot->total_length, 0.0f);
+                    /* A single year cannot make up an unlimited backlog. */
+                    increment = tg_minf(increment, annual * 2.5f);
+                } else {
+                    increment = annual * decay * vigour;
+                }
+                u32 nodes = tg_clamp_u32(
+                    (u32)(increment / tg_maxf(target_internode, 1e-6f) + 0.5f),
+                    1u, nodes_full);
+                f32 internode;
+                /* Minimum length of an EMITTED internode. Botanical nodes shorter
+                 * than this are grouped into one segment; their buds still sit at
+                 * their true fractional positions along it. See
+                 * TreeResolved::internode_geometry_scale for why the grouping is
+                 * done here rather than by moving the nodes themselves. */
+                f32 geom_min = target_internode
+                             * tg_maxf(r_local.internode_geometry_scale, 1.0f)
+                             * 0.999f;
+                u32 node = 0;
+                f32 node_len[40];
+                bool stopped = false;
+
+                /* Carry this year's extension forward until it is worth a ring.
+                 * The trunk is exempt: it tracks the height curve step by step and
+                 * its increments always clear the threshold anyway, and holding it
+                 * back would put a visible stair in the construction replay. */
+                s->pending_len += increment;
+                s->pending_nodes += nodes;
+                /* An axis ALWAYS emits its first internode. Deferring it left
+                 * axes carrying zero organs -- first_organ == TG_INVALID_ID -- and
+                 * the graph walk dereferenced them and crashed. A shoot that has
+                 * broken from its bud is a real, physically present twig, however
+                 * short; the accumulation applies to what it does afterwards. */
+                if (order > 0u && axis_snapshot->organ_count > 0u
+                        && s->pending_len < geom_min) {
                     continue;
                 }
-                if (r != TG_OK) { goto done; }
-                st.segments_added++;
-                if (out_result != NULL) {
-                    out_result->segments_created++;
-                    if (order > out_result->max_order_reached) {
-                        out_result->max_order_reached = order;
+                nodes = tg_clamp_u32(s->pending_nodes, 1u,
+                                     (u32)TG_COUNTOF(node_len));
+                internode = s->pending_len / (f32)nodes;
+                s->pending_len = 0.0f;
+                s->pending_nodes = 0u;
+
+                while (node < nodes && !stopped) {
+                    u32 group_start = node;
+                    u32 group_count = 0;
+                    f32 group_len = 0.0f;
+                    f32 acrotony;
+                    f32 acc;
+                    u32 gi;
+                    u32 per_node;
+                    u32 sub;
+
+                    /* Accumulate botanical nodes until the group is long enough to
+                     * be worth its own ring of geometry, or the flush runs out. */
+                    while (node < nodes
+                           && group_count < (u32)TG_COUNTOF(node_len)) {
+                        TgRng rng_len = tg_rng_substream(
+                            resolved->settings.seed, TG_RNG_INTERNODE_LENGTH, i,
+                            (u32)step * 64u + node);
+                        f32 vary = 1.0f + tg_rng_signed(&rng_len)
+                                          * c.p->internode_length_spread;
+                        f32 nlen = tg_maxf(internode * vary, internode * 0.25f);
+                        node_len[group_count++] = nlen;
+                        group_len += nlen;
+                        node++;
+                        if (group_len >= geom_min) { break; }
                     }
-                }
-            }
+                    if (group_count == 0u) { break; }
+                    acrotony = (f32)group_start / (f32)nodes;
 
-            /* Consume attractors the new tip has reached. This is what stops the
-             * crown filling uniformly: space is claimed, and later shoots must go
-             * elsewhere. */
-            {
-                V3 tip = organ_tip(tree_graph_organ(graph, new_organ));
-                u32 buf[64];
-                u32 cnt = 0, tot = 0;
-                u32 k;
-                (void)spatial_query_radius(&c.attractors, tip, c.p->kill_radius_m,
-                                           buf, (u32)TG_COUNTOF(buf), &cnt, &tot);
-                for (k = 0; k < cnt; ++k) {
-                    if (spatial_remove(&c.attractors, buf[k]) &&
-                        out_result != NULL) {
-                        out_result->attractors_consumed++;
+                    /* Stop conditions are re-checked at EVERY emitted internode,
+                     * not once per flush: a shoot reaching the crown surface
+                     * mid-year must stop there instead of overshooting by a whole
+                     * annual increment. */
+                    if (pos.y >= r_local.height_m) {
+                        s->active = false;
+                        if (out_result != NULL) { out_result->stopped_by_height++; }
+                        break;
                     }
-                }
-            }
-
-            /* --- nodes, buds, and bud break ------------------------------- */
-            {
-                u32 per_node = buds_per_node(c.p, order);
-                u32 sub;
-                s->node_counter++;
-                for (sub = 0; sub < per_node; ++sub) {
-                    f32 ang = phyllotactic_angle(c.p, s->node_counter, sub);
-                    const Organ *host = tree_graph_organ(graph, new_organ);
-                    Frame hf;
-                    V3 radial, bud_dir;
-                    u32 bud_id;
-
-                    hf.origin = host->base;
-                    hf.t = host->direction;
-                    hf.n = host->frame_ref;
-                    hf.b = v3_cross(hf.t, hf.n);
-                    radial = frame_ring_dir(hf, ang);
-
-                    /* The bud points outward and distally at the profile's
-                     * insertion angle for the NEXT order -- the angle is a
-                     * property of the union, so it is set here where the bud is
-                     * created rather than when it breaks. */
-                    {
-                        f32 insert = tree_resolved_branch_angle(resolved,
-                                                                order + 1u);
-                        bud_dir = v3_norm_or(
-                            v3_add(v3_scale(host->direction, cosf(insert)),
-                                   v3_scale(radial, sinf(insert))),
-                            radial);
-                    }
-
-                    r = tree_graph_add_attachment(graph, new_organ,
-                                                  ORGAN_BUD_AXILLARY, 0.98f, ang,
-                                                  bud_dir, c.p->tip_radius_m * 2.0f,
-                                                  step, &bud_id);
-                    if (r == TG_ERR_LIMIT_EXCEEDED) {
-                        if (out_result != NULL) {
-                            out_result->hit_organ_limit = true;
+                    if (order > 0) {
+                        f32 env = envelope_now(&c, &r_local, pos.y);
+                        f32 radial = v3_len(v3(pos.x, 0.0f, pos.z));
+                        if (radial > env * 1.05f) {
+                            /* Surface reached part-way through the year. Stop
+                             * here rather than overshoot by a whole increment,
+                             * and pin the shoot so next year's test decides
+                             * whether the crown has grown out past it. */
+                            s->at_surface = true;
+                            if (!s->surface_counted) {
+                                s->surface_counted = true;
+                                if (out_result != NULL) {
+                                    out_result->stopped_by_envelope++;
+                                }
+                            }
+                            break;
                         }
+                    }
+                    if (tree_graph_organ_count(graph) + 4u
+                            >= c.shoot_organ_budget) {
+                        if (out_result != NULL) { out_result->hit_organ_limit = true; }
+                        s->active = false;
+                        break;
+                    }
+
+                    /* Direction correction per emitted internode, with the year's
+                     * angular budget divided in proportion to the share of the
+                     * year this internode represents, so the total turn per year
+                     * remains what the profile intends however coarsely the year
+                     * is tessellated. */
+                    dir = next_direction(&c, axis_snapshot, pos, dir, order,
+                                         &rng_dir,
+                                         (f32)group_count / (f32)nodes);
+
+                    r = tree_graph_add_segment(
+                        graph, i,
+                        order == 0 ? ORGAN_TRUNK_SEGMENT
+                                   : (order >= 3 ? ORGAN_TWIG_SEGMENT
+                                                 : ORGAN_BRANCH_SEGMENT),
+                        pos, dir, group_len, step, &new_organ);
+                    if (r == TG_ERR_LIMIT_EXCEEDED) {
+                        if (out_result != NULL) { out_result->hit_organ_limit = true; }
+                        s->active = false;
                         r = TG_OK;
                         break;
                     }
                     if (r != TG_OK) { goto done; }
-                    st.buds_placed++;
-                    if (out_result != NULL) { out_result->buds_created++; }
+                    st.segments_added++;
+                    if (out_result != NULL) {
+                        out_result->extension_steps++;
+                        out_result->segments_created++;
+                        if (order > out_result->max_order_reached) {
+                            out_result->max_order_reached = order;
+                        }
+                    }
+                    pos = organ_tip(tree_graph_organ(graph, new_organ));
 
-                    if (should_break_bud(&c, order, s->own_light, s->node_counter,
-                                         &rng_bud)) {
-                        u32 child_axis;
-                        V3 child_base = organ_tip(tree_graph_organ(graph,
-                                                                   new_organ));
-                        f32 set_angle =
-                            tree_resolved_set_angle(resolved, order + 1u);
-                        TgRng rng_ang = tg_rng_substream(resolved->settings.seed,
-                                                         TG_RNG_BRANCH_ANGLE,
-                                                         bud_id, 0);
-                        /* Spread around the profile's insertion angle: real
-                         * unions vary, and identical angles read as a template. */
-                        set_angle += tg_rng_signed(&rng_ang)
-                                   * c.p->branch_angle_spread_deg * TG_DEG2RAD_F;
-
-                        /* REITERATION: a Rauh architecture becomes DECURRENT as
-                         * apical control decays. Once control is weak, a
-                         * well-lit bud high in the crown can produce a second
-                         * ORTHOTROPIC leader rather than a plagiotropic lateral,
-                         * and the crown starts forking. This is the mechanism
-                         * behind the difference between an oak's broad forked
-                         * crown and a fir's single spire -- Massart keeps strong
-                         * control for life and never reiterates.
-                         *
-                         * Without this the two architectures differed only in
-                         * their numbers, not in their structure. */
-                        AxisKind child_kind = AXIS_PLAGIOTROPIC;
-                        bool co_dominant = false;
-                        if (c.p->architecture == TREE_ARCH_RAUH) {
-                            f32 weakness = tg_remap01f(resolved->apical_control,
-                                                       0.62f, 0.42f);
-                            f32 high = tg_remap01f(child_base.y,
-                                                   resolved->height_m * 0.35f,
-                                                   resolved->height_m * 0.85f);
-                            TgRng rr = tg_rng_substream(resolved->settings.seed,
-                                                        TG_RNG_BUD_FATE,
-                                                        bud_id, 7u);
-                            if (tg_rng_chance(&rr, 0.55f * weakness * high
-                                                   * s->own_light)) {
-                                child_kind = AXIS_ORTHOTROPIC;
-                                set_angle *= 0.25f; /* turns toward vertical */
-                                co_dominant = true;
+                    /* Claim the space just occupied, so later shoots must go
+                     * elsewhere. */
+                    {
+                        u32 buf[64];
+                        u32 cnt = 0, tot = 0;
+                        u32 k;
+                        (void)spatial_query_radius(&c.attractors, pos,
+                                                   c.p->kill_radius_m, buf,
+                                                   (u32)TG_COUNTOF(buf), &cnt,
+                                                   &tot);
+                        for (k = 0; k < cnt; ++k) {
+                            if (spatial_remove(&c.attractors, buf[k]) &&
+                                out_result != NULL) {
+                                out_result->attractors_consumed++;
                             }
                         }
-                        r = tree_graph_add_axis(graph, i, bud_id, child_kind,
-                                                (u8)(order + 1u), step,
-                                                set_angle, child_base, bud_dir,
-                                                &child_axis);
-                        if (r != TG_OK) { goto done; }
-                        if (co_dominant) {
-                            tree_graph_axis_mut(graph, child_axis)->flags |=
-                                ORGAN_FLAG_CO_DOMINANT;
-                            tree_graph_organ_mut(graph, bud_id)->flags |=
-                                ORGAN_FLAG_CO_DOMINANT;
-                        }
-                        r = shoot_add(&c, child_axis);
-                        if (r != TG_OK) { goto done; }
-                        /* The bud has broken: it is no longer dormant, and the
-                         * record of that transition is what later distinguishes
-                         * a bud-scale scar from a live bud. */
-                        {
-                            Organ *b = tree_graph_organ_mut(graph, bud_id);
-                            b->flags &= ~(u32)ORGAN_FLAG_DORMANT;
-                        }
-                        st.buds_broken++;
-                        if (out_result != NULL) {
-                            out_result->buds_broken++;
-                            out_result->axes_created++;
+                    }
+
+                    /* Buds at this node.
+                     *
+                     * A bud ORGAN is created only when the bud actually breaks. A
+                     * mature tree carries on the order of a million leaf scars and
+                     * dormant buds; storing a graph organ for each would dominate
+                     * memory for no benefit. Dormant buds, bud-scale scars and leaf
+                     * scars are surface features, and the bark and foliage passes
+                     * can derive their positions from the node index and the
+                     * phyllotactic angle without an organ existing. */
+                    /* One pass per BOTANICAL node in the group. The emitted
+                     * internode may stand for several of them, so buds are placed
+                     * at their true fractional positions along it rather than all
+                     * being stacked at its distal end. Phyllotaxis advances once
+                     * per botanical node, which is what keeps the spiral correct
+                     * regardless of how coarsely the year was tessellated. */
+                    acc = 0.0f;
+                    for (gi = 0; gi < group_count; ++gi) {
+                        f32 frac;
+                        acc += node_len[gi];
+                        frac = (group_len > 1e-9f)
+                                 ? tg_clampf(acc / group_len, 0.05f, 1.0f)
+                                 : 1.0f;
+                        s->node_counter++;
+                        /* Position within the ANNUAL SHOOT: 0 at its base, 1 at
+                         * its distal end. Unchanged by the grouping. */
+                        acrotony = (f32)(group_start + gi + 1u) / (f32)nodes;
+
+                        per_node = buds_per_node(c.p, order);
+                        for (sub = 0; sub < per_node; ++sub) {
+                            f32 ang = phyllotactic_angle(c.p, s->node_counter, sub);
+                            const Organ *host;
+                            Frame hf;
+                            V3 radial, bud_dir, child_base;
+                            u32 bud_id, child_axis;
+                            f32 set_angle;
+                            AxisKind child_kind = AXIS_PLAGIOTROPIC;
+                            bool co_dominant = false;
+
+                            if (!should_break_bud(&c, order, s->own_light,
+                                                  s->node_counter, acrotony,
+                                                  &rng_bud)) {
+                                continue;
+                            }
+
+                            host = tree_graph_organ(graph, new_organ);
+                            hf.origin = host->base;
+                            hf.t = host->direction;
+                            hf.n = host->frame_ref;
+                            hf.b = v3_cross(hf.t, hf.n);
+                            radial = frame_ring_dir(hf, ang);
+                            {
+                                f32 insert = tree_resolved_branch_angle(resolved,
+                                                                        order + 1u);
+                                bud_dir = v3_norm_or(
+                                    v3_add(v3_scale(host->direction, cosf(insert)),
+                                           v3_scale(radial, sinf(insert))),
+                                    radial);
+                            }
+
+                            r = tree_graph_add_attachment(graph, new_organ,
+                                                          ORGAN_BUD_AXILLARY, frac,
+                                                          ang, bud_dir,
+                                                          c.p->tip_radius_m * 2.0f,
+                                                          step, &bud_id);
+                            if (r == TG_ERR_LIMIT_EXCEEDED) {
+                                if (out_result != NULL) {
+                                    out_result->hit_organ_limit = true;
+                                }
+                                r = TG_OK;
+                                break;
+                            }
+                            if (r != TG_OK) { goto done; }
+                            st.buds_placed++;
+                            if (out_result != NULL) { out_result->buds_created++; }
+
+                            /* The child starts AT ITS BUD, not at the end of the host
+                             * segment. With several nodes to a segment this is the
+                             * difference between laterals distributed along a branch
+                             * and laterals bunched at its joints. */
+                            host = tree_graph_organ(graph, new_organ);
+                            child_base = v3_add(host->base,
+                                                v3_scale(host->direction,
+                                                         host->length * frac));
+                            set_angle = tree_resolved_set_angle(resolved, order + 1u);
+                            {
+                                TgRng rng_ang = tg_rng_substream(
+                                    resolved->settings.seed, TG_RNG_BRANCH_ANGLE,
+                                    bud_id, 0);
+                                set_angle += tg_rng_signed(&rng_ang)
+                                    * c.p->branch_angle_spread_deg * TG_DEG2RAD_F;
+                            }
+                            /* REITERATION: as apical control decays, a well-lit high
+                             * bud on a Rauh architecture can produce a second
+                             * ORTHOTROPIC leader and the crown begins to fork. Massart
+                             * keeps strong control for life and never reiterates. */
+                            if (c.p->architecture == TREE_ARCH_RAUH) {
+                                f32 weakness = tg_remap01f(resolved->apical_control,
+                                                           0.62f, 0.42f);
+                                f32 high = tg_remap01f(child_base.y,
+                                                       resolved->height_m * 0.35f,
+                                                       resolved->height_m * 0.85f);
+                                TgRng rr = tg_rng_substream(resolved->settings.seed,
+                                                            TG_RNG_BUD_FATE, bud_id,
+                                                            7u);
+                                if (tg_rng_chance(&rr, 0.55f * weakness * high
+                                                      * s->own_light)) {
+                                    child_kind = AXIS_ORTHOTROPIC;
+                                    set_angle *= 0.25f;
+                                    co_dominant = true;
+                                }
+                            }
+
+                            r = tree_graph_add_axis(graph, i, bud_id, child_kind,
+                                                    (u8)(order + 1u), step, set_angle,
+                                                    child_base, bud_dir, &child_axis);
+                            if (r != TG_OK) { goto done; }
+                            if (co_dominant) {
+                                tree_graph_axis_mut(graph, child_axis)->flags
+                                    |= ORGAN_FLAG_CO_DOMINANT;
+                                tree_graph_organ_mut(graph, bud_id)->flags
+                                    |= ORGAN_FLAG_CO_DOMINANT;
+                            }
+                            r = shoot_add(&c, child_axis);
+                            if (r != TG_OK) { goto done; }
+                            /* REFETCH, AND THIS IS NOT OPTIONAL.
+                             *
+                             * `s` points into the shoot array and `axis_snapshot`
+                             * into the graph's axis array. Both have just had an
+                             * element appended and may therefore have been
+                             * reallocated and moved. Continuing to use the old
+                             * pointers is a use-after-free, and it was a real one:
+                             * it segfaulted every conifer, whose whorled nodes
+                             * append several axes inside a single internode, and
+                             * it had merely been getting away with it while the
+                             * loop touched `s` less often between appends. */
+                            s = shoot_of(&c, i);
+                            axis_snapshot = tree_graph_axis(graph, i);
+                            {
+                                Organ *bo = tree_graph_organ_mut(graph, bud_id);
+                                bo->flags &= ~(u32)ORGAN_FLAG_DORMANT;
+                            }
+                            st.buds_broken++;
+                            if (out_result != NULL) {
+                                out_result->buds_broken++;
+                                out_result->axes_created++;
+                            }
                         }
                     }
                 }
+                TG_UNUSED(stopped);
             }
         }
 
