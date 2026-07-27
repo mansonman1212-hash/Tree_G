@@ -62,7 +62,10 @@ GEOM_SOURCES=(
     "src/geom/spatial.c"
     "src/geom/camera.c"
 )
-TREE_SOURCES=()
+TREE_SOURCES=(
+    "src/tree/tree_profile.c"
+    "src/tree/tree_graph.c"
+)
 
 TEST_SOURCES=(
     "tests/test_main.c"
@@ -73,6 +76,8 @@ TEST_SOURCES=(
     "tests/test_mesh.c"
     "tests/test_spatial.c"
     "tests/test_camera.c"
+    "tests/test_tree_profile.c"
+    "tests/test_tree_graph.c"
 )
 
 # -------------------------------------------------------------------------

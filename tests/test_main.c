@@ -111,6 +111,8 @@ int main(int argc, char **argv) {
         { "geom/mesh",       test_suite_mesh },
         { "geom/spatial",    test_suite_spatial },
         { "geom/camera",     test_suite_camera },
+        { "tree/profile",    test_suite_tree_profile },
+        { "tree/graph",      test_suite_tree_graph },
     };
     const char *filter = NULL;
     size_t i;
