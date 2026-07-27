@@ -15,6 +15,7 @@ const char *tg_test_case_name = "<none>";
 
 static const char *g_current_suite = "<none>";
 static u32 g_suite_failures_at_start;
+static u32 g_suite_checks_at_start;
 
 void tg_test_case(const char *name) {
     tg_test_case_name = name != NULL ? name : "<unnamed>";
@@ -56,6 +57,7 @@ static void run_suite(const Suite *s) {
 
     g_current_suite = s->name;
     g_suite_failures_at_start = tg_test_failures;
+    g_suite_checks_at_start = tg_test_checks;
     live_before = tg_mem_stats().live_bytes;
     printf("== %-22s ", s->name);
     fflush(stdout);
@@ -72,10 +74,15 @@ static void run_suite(const Suite *s) {
                                (long long)live_after - (long long)live_before);
     }
 
+    /* Per-suite check counts. A change in the count of a suite whose sources did
+     * not change means some loop's iteration count is data dependent, which is
+     * worth knowing about in a project with a determinism contract. */
     if (tg_test_failures == g_suite_failures_at_start) {
-        printf("ok\n");
+        printf("ok   (%u checks)\n", tg_test_checks - g_suite_checks_at_start);
     } else {
-        printf("FAILED (%u)\n", tg_test_failures - g_suite_failures_at_start);
+        printf("FAILED (%u of %u checks)\n",
+               tg_test_failures - g_suite_failures_at_start,
+               tg_test_checks - g_suite_checks_at_start);
     }
 }
 
@@ -102,6 +109,8 @@ int main(int argc, char **argv) {
         { "core/rng",        test_suite_rng },
         { "core/hash",       test_suite_hash },
         { "geom/mesh",       test_suite_mesh },
+        { "geom/spatial",    test_suite_spatial },
+        { "geom/camera",     test_suite_camera },
     };
     const char *filter = NULL;
     size_t i;

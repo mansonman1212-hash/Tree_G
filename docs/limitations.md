@@ -27,8 +27,7 @@ Consequences, stated plainly:
 As of the current commit, the following exist as design decisions in
 `docs/research.md` and `docs/architecture.md` and as nothing else:
 
-- Geometry layer: mesh containers, junction meshing, mesh validation, spatial
-  index, BVH, camera.
+- Geometry layer: junction meshing, BVH.
 - Tree layer: profiles, biological graph, growth simulation, roots, mechanics,
   bark, leaves, needles, damage, build orchestration, construction stage records.
 - Render layer: Win32 platform, D3D12 device, raster PBR renderer, progressive
@@ -42,10 +41,13 @@ As of the current commit, the following exist as design decisions in
 
 **Layer 0 (core)** — `core_types.h`, `log`, `mem`, `math3d`, `hash`, `rng`.
 
-Verified by 102 test cases / 452 933 checks passing under clang and gcc, in
+**Layer 1 (geom), partial** — `mesh`, `mesh_validate`, `spatial`, `camera`.
+Still missing from this layer: `mesh_junction` and `bvh`.
+
+Verified by 210 test cases / 474 357 checks passing under clang and gcc, in
 debug and release, with zero warnings under `-Werror` and an aggressive warning
-set. Details and the specific failure modes each test targets are in
-`docs/testing.md`.
+set, producing byte-identical output across all four configurations. Details and
+the specific failure modes each test targets are in `docs/testing.md`.
 
 ## 4. Tooling gaps in the development sandbox
 

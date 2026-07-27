@@ -59,6 +59,8 @@ CORE_SOURCES=(
 GEOM_SOURCES=(
     "src/geom/mesh.c"
     "src/geom/mesh_validate.c"
+    "src/geom/spatial.c"
+    "src/geom/camera.c"
 )
 TREE_SOURCES=()
 
@@ -69,6 +71,8 @@ TEST_SOURCES=(
     "tests/test_rng.c"
     "tests/test_hash.c"
     "tests/test_mesh.c"
+    "tests/test_spatial.c"
+    "tests/test_camera.c"
 )
 
 # -------------------------------------------------------------------------
