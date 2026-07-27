@@ -666,19 +666,51 @@ TgResult tree_graph_validate(const TreeGraph *g, f32 connection_tolerance,
             }
             continue;
         }
-        /* Segments of one axis must form a contiguous ascending id run. Meshing
-         * sweeps cross-sections along an axis and relies on this. */
-        for (id = a->first_organ; id <= a->last_organ && id < n; ++id) {
+        /* An axis's organs form an ORDERED CHAIN, not a contiguous id run.
+         *
+         * This distinction is load-bearing. Developmental growth extends many
+         * axes in alternation across growth steps, so a single axis's organs are
+         * necessarily interleaved with other axes' in id space. An earlier
+         * version of this check demanded contiguity and rejected every genuinely
+         * grown tree; the requirement was wrong, not the growth. Meshing
+         * therefore walks the chain and uses index_in_axis as the authoritative
+         * order, rather than assuming an id range.
+         *
+         * Walk from first_organ, at each step following the child that belongs to
+         * the same axis. Guarded against cycles by the organ count. */
+        id = a->first_organ;
+        while (id != TG_INVALID_ID && id < n) {
             const Organ *o = tree_graph_organ(g, id);
-            if (o->axis != i) {
-                record(report, GRAPH_ISSUE_AXIS_NOT_CONTIGUOUS, id);
-                break;
-            }
-            if (o->index_in_axis != counted) {
+            u32 child;
+            u32 next = TG_INVALID_ID;
+            if (o->axis != i || !organ_type_is_segment((OrganType)o->type) ||
+                o->index_in_axis != counted) {
                 record(report, GRAPH_ISSUE_AXIS_NOT_CONTIGUOUS, id);
                 break;
             }
             counted++;
+            if (counted > a->organ_count) {
+                record(report, GRAPH_ISSUE_AXIS_COUNT_MISMATCH, i);
+                break;
+            }
+            /* Only SEGMENT children continue an axis. Buds, leaves and scars
+             * share their host's axis id (which is useful for queries) but are
+             * not links in the chain, so the walk must skip them. */
+            for (child = o->first_child; child != TG_INVALID_ID && child < n;) {
+                const Organ *cc = tree_graph_organ(g, child);
+                if (cc->axis == i && organ_type_is_segment((OrganType)cc->type)) {
+                    next = child;
+                    break;
+                }
+                child = cc->next_sibling;
+            }
+            if (next == TG_INVALID_ID) {
+                if (id != a->last_organ) {
+                    record(report, GRAPH_ISSUE_AXIS_NOT_CONTIGUOUS, id);
+                }
+                break;
+            }
+            id = next;
         }
         if (counted != a->organ_count) {
             record(report, GRAPH_ISSUE_AXIS_COUNT_MISMATCH, i);

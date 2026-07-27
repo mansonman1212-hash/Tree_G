@@ -209,7 +209,7 @@ static const TreeProfile g_broadleaf[] = {
 
         26.0f,                          /* mature_height_m                   */
         140.0f,                         /* maturity_age_years                */
-        0.45f,                          /* juvenile_height_rate m/yr         */
+        0.43f,                          /* juvenile_height_rate m/yr         */
         1.15f,                          /* crown_width_ratio: wider than tall */
         0.52f,                          /* crown_widest_at: rounded crown    */
         0.28f,                          /* crown_base_height_ratio           */
@@ -217,7 +217,11 @@ static const TreeProfile g_broadleaf[] = {
         5,                              /* max_branch_order                  */
         { 0.0f, 48.0f, 55.0f, 62.0f, 68.0f, 72.0f },
         14.0f,                          /* branch_angle_spread_deg           */
-        { 0.55f, 0.34f, 0.20f, 0.12f, 0.070f, 0.045f },
+        /* Order 0 IS the juvenile annual height increment: the growth model
+         * decays it as exp(-t/k), so summing the leader's internodes over the
+         * whole history reproduces mature_height exactly. Enforced by
+         * tree_profile_validate. */
+        { 0.43f, 0.34f, 0.20f, 0.12f, 0.070f, 0.045f },
         0.30f,                          /* internode_length_spread           */
         { 1.0f, 0.62f, 0.55f, 0.48f, 0.40f, 0.32f },
         1,                              /* flushes_per_year                  */
@@ -235,7 +239,12 @@ static const TreeProfile g_broadleaf[] = {
         0.45f,                          /* phototropism                      */
         0.42f,                          /* max_turn_per_step (rad)           */
 
-        45.0f,                          /* attractor_density per m^3         */
+        /* Density is CALIBRATED against the influence radius, not chosen for
+         * looks: the influence sphere has volume (4/3)pi*1.6^3 = 17.2 m^3, so
+         * 2.5 points per m^3 puts about 43 attractors in range of a tip. Enough
+         * for a well-conditioned average direction, and far below the query
+         * buffer so the result is never truncated. */
+        2.5f,                           /* attractor_density per m^3         */
         1.6f,                           /* influence_radius_m                */
         0.42f,                          /* kill_radius_m                     */
 
@@ -261,7 +270,11 @@ static const TreeProfile g_broadleaf[] = {
         0.42f,                          /* bark_ridge_prominence             */
 
         6,                              /* major_root_count                  */
-        0.85f,                          /* root_spread_ratio                 */
+        /* Root spread is a multiple of CROWN WIDTH, not of height. Tying it to
+         * height gave a 21 m root radius around a 5 m crown -- four times the
+         * crown radius, which no temperate tree does. Field guidance puts the
+         * structural root plate at roughly one to three times the crown radius. */
+        1.20f,                          /* root_spread_ratio (x crown width) */
         0.16f,                          /* root_depth_ratio                  */
         1.85f,                          /* root_flare_ratio                  */
         0.35f,                          /* taproot_strength                  */
@@ -296,15 +309,21 @@ static const TreeProfile g_conifer[] = {
 
         34.0f,                          /* mature_height_m: taller, narrower  */
         110.0f,
-        0.55f,
+        0.71f,
         0.36f,                          /* crown_width_ratio: narrow cone     */
         0.06f,                          /* crown_widest_at: near the base      */
         0.10f,                          /* crown_base_height_ratio: low skirt  */
 
-        4,
+        /* Three orders, not four. A conifer whorl already contributes five
+         * laterals per annual node on the trunk, so a fourth order multiplied the
+         * shoot count to twelve times the broadleaf's per unit crown volume and
+         * 86% of all shoot segments died of self-shading -- a tree made mostly of
+         * deadwood. Reducing the cascade is the correct fix: the crowding was the
+         * cause, the mortality only the symptom. */
+        3,
         { 0.0f, 82.0f, 74.0f, 70.0f, 68.0f, 66.0f },
         9.0f,                           /* tighter: whorls are regular        */
-        { 0.42f, 0.30f, 0.17f, 0.090f, 0.055f, 0.040f },
+        { 0.71f, 0.30f, 0.17f, 0.090f, 0.055f, 0.040f },
         0.18f,
         { 1.0f, 0.50f, 0.46f, 0.40f, 0.34f, 0.30f },
         1,
@@ -319,13 +338,22 @@ static const TreeProfile g_conifer[] = {
         0.22f,                          /* less phototropic than broadleaf    */
         0.30f,
 
-        60.0f,
-        1.1f,
-        0.30f,
+        /* Influence sphere (4/3)pi*1.1^3 = 5.6 m^3; 5 per m^3 gives ~28 in
+         * range. Denser than the broadleaf because conifer internodes and the
+         * kill radius are both smaller. */
+        5.0f,                           /* attractor_density per m^3         */
+        1.1f,                           /* influence_radius_m                */
+        0.30f,                          /* kill_radius_m                     */
 
-        0.10f,                          /* dies in shade sooner: lower skirt  */
-        3,
-        0.30f,
+        /* Conifer crowns are far denser than broadleaf crowns by construction
+         * (five laterals per annual whorl), so their shoots must tolerate more
+         * self-shading or the model kills nearly all of them: measured 88.7% of
+         * shoot segments dead before this was corrected. Evergreen conifers do
+         * hold suppressed branches for many years, so a longer tolerance is
+         * biologically right as well as necessary. */
+        0.07f,                          /* light_death_threshold             */
+        7,                              /* suppression_tolerance_steps       */
+        0.55f,                          /* shade_tolerance                   */
 
         2.30f,                          /* leonardo_exponent                 */
         0.0016f,
@@ -345,7 +373,7 @@ static const TreeProfile g_conifer[] = {
         0.30f,
 
         5,
-        0.95f,                          /* wide shallow plate                 */
+        1.80f,                          /* root_spread_ratio: wide shallow plate */
         0.09f,
         1.55f,
         0.10f,                          /* weak taproot in the mature form    */
@@ -478,6 +506,25 @@ TgResult tree_profile_validate(const TreeProfile *p) {
                "crown_base_height_ratio outside [0,1)");
     TP_REQUIRE(p->leonardo_exponent > 1.5f && p->leonardo_exponent < 4.0f,
                "leonardo exponent outside a physically sensible range");
+    /* COHERENCE BETWEEN THE HEIGHT MODEL AND THE GROWTH MODEL.
+     *
+     * The height curve is h(t) = H(1 - exp(-t/k)) with k = maturity_age/ln(10),
+     * so its initial slope is H/k. The growth simulation extends the leader by
+     * internode_length_m[0] * exp(-t/k) each flush, which integrates to exactly H
+     * only if internode_length_m[0] equals H/k. If the two disagree, the grown
+     * tree systematically misses its own target height -- a 60-year tree came out
+     * 29.7 m against a 16.1 m target before this was enforced. */
+    {
+        f32 k = p->maturity_age_years / 2.302585093f;
+        f32 expected = p->mature_height_m / tg_maxf(k, 0.1f)
+                     / (f32)tg_max_u32(p->flushes_per_year, 1u);
+        TP_REQUIRE(tg_absf(p->internode_length_m[0] - expected)
+                       < expected * 0.15f,
+                   "internode_length_m[0] must equal the juvenile annual height "
+                   "increment mature_height/(maturity_age/ln10) within 15%");
+        TP_REQUIRE(tg_absf(p->juvenile_height_rate - expected) < expected * 0.20f,
+                   "juvenile_height_rate is inconsistent with the height curve");
+    }
     TP_REQUIRE(p->tip_radius_m > 0.0f, "non-positive tip radius");
     TP_REQUIRE(p->wood_modulus_pa > 1.0e8f, "implausibly low wood modulus");
     TP_REQUIRE(p->wood_density_kgm3 > 100.0f, "implausibly low wood density");
@@ -496,6 +543,9 @@ TgResult tree_profile_validate(const TreeProfile *p) {
     TP_REQUIRE(p->major_root_count >= 2, "a tree needs at least 2 major roots");
     TP_REQUIRE(p->root_spread_ratio > 0.0f && p->root_depth_ratio > 0.0f,
                "non-positive root extent");
+    TP_REQUIRE(p->root_spread_ratio >= 0.5f && p->root_spread_ratio <= 4.0f,
+               "root_spread_ratio is a multiple of CROWN WIDTH and must stay in "
+               "[0.5, 4.0]");
     TP_REQUIRE(p->root_flare_ratio > 1.0f,
                "root flare must be wider than the trunk");
     TP_REQUIRE(p->max_turn_per_step > 0.0f && p->max_turn_per_step < TG_PI_F,
@@ -828,8 +878,14 @@ TgResult tree_profile_resolve(const TreeSettings *settings, TreeResolved *out) {
         out->foliage_density *= 0.80f;
     }
 
-    /* --- roots ------------------------------------------------------------- */
-    out->root_spread_m = out->height_m * p->root_spread_ratio
+    /* --- roots -------------------------------------------------------------
+     *
+     * Root spread is scaled from CROWN WIDTH, not from height, so the root plate
+     * relates to the structure it actually supports. Scaling from height was
+     * measured to give a 61.9 m root radius around a 4.9 m conifer crown -- a
+     * 12:1 ratio that no temperate tree exhibits. Field guidance puts the
+     * structural root plate at roughly one to three times the crown radius. */
+    out->root_spread_m = out->crown_width_m * 0.5f * p->root_spread_ratio
                        /* Compacted soil forces a shallower, wider system. */
                        * tg_lerpf(1.0f, 1.25f, env->soil_resistance);
     out->root_depth_m = out->height_m * p->root_depth_ratio

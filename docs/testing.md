@@ -56,6 +56,24 @@ tests/test_spatial.c grid queries checked against a brute-force reference,
                     ascending-order guarantee, bounded-output determinism,
                     cell-size invariance, removal without rebuild, degenerate
                     distributions, bad input rejection
+tests/test_tree_profile.c  built-in profile coherence, 18 negative tests for the
+                    directive's forbidden botanical combinations, correlated
+                    resolution (age, wind, canopy, soil, health, season), bounded
+                    seed individuality, quality budgets that change resolution
+                    only, crown envelope shape per category
+tests/test_tree_graph.c  ordering invariant, RMF frame propagation and continuity
+                    across unions, 14 corruption-detection cases, radius
+                    invariant with its deformity escape, finalisation
+                    immutability, subtree mortality, basipetal accumulation on a
+                    30 000-segment chain, fingerprint sensitivity
+tests/test_tree_growth.c  attractor cloud placement and calibration, full-tree
+                    validation, bit-identical determinism, per-setting
+                    sensitivity, broadleaf/conifer architectural distinction via
+                    reiteration, roots not mirrored branches, shade mortality
+                    with a measured height bias, directional crown asymmetry with
+                    an isotropic control, branch orders not scaled copies,
+                    sibling inequality from the resource partition, age
+                    progression, cancellation, organ-budget reservation
 tests/test_camera.c FOV clamping, basis orthonormality, pitch clamp with no
                     gimbal flip, orbit leaves pivot untouched, framing from any
                     angle and aspect, visibility-predicate anti-vacuity,
@@ -99,6 +117,16 @@ otherwise be likely to ship.
 | pick-ray angle equals FOV/2 | picking offset from what the user clicked |
 | minimised-window aspect | NaN projection persisting after restore |
 | visibility-predicate anti-vacuity | a framing test suite that asserts nothing |
+| axis chain walk over non-segment children | a validator that rejects every genuinely grown tree because growth interleaves axes |
+| internode length tied to the height-curve derivative | growth and resolution models disagreeing; a 60-year tree came out 29.7 m against a 16.1 m target |
+| light sampled ahead of the apex | every new lateral condemned at birth, giving 60% mortality with no height bias |
+| directional (light-hemisphere) occlusion | counting all neighbours, so a shoot's own siblings shaded it and no second branch order ever formed |
+| canopy closure entering the light field | a forest tree suffering LESS mortality than an open-grown one |
+| organ-budget reservation for roots | a large conifer spending the whole ceiling above ground and generating no roots at all |
+| shade mortality height bias | mortality that exists but is not actually shade driven |
+| isotropic-light control case | crown asymmetry that appears without a cause |
+| root/crown radius ratio | root spread scaled from height, giving a 12:1 plate on the conifer |
+| conifer mortality gate | a recorded known defect silently getting worse |
 | reverse-Z near→1 / far→0 and monotonicity | depth silently rebuilt as conventional Z, or sign error making everything fail the depth test |
 | "reverse-Z concentrates precision near the camera" | a refactor that keeps the endpoints correct but loses the precision distribution |
 | vertical-FOV assertion against `tan(fov/2)` | accidental fisheye or a factor-of-two error in the FOV |
@@ -132,10 +160,10 @@ Run on the development host (Linux x86-64), both available compilers:
 
 | Configuration | Result |
 |---|---|
-| clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | 210 cases, 474 357 checks, 0 failures |
-| clang 15.0.7, release (`-O2 -DNDEBUG`) | 210 cases, 474 357 checks, 0 failures |
-| gcc 11.5.0, debug | 210 cases, 474 357 checks, 0 failures |
-| gcc 11.5.0, release | 210 cases, 474 357 checks, 0 failures |
+| clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | 348 cases, 513 279 checks, 0 failures |
+| clang 15.0.7, release (`-O2 -DNDEBUG`) | 348 cases, 513 279 checks, 0 failures |
+| gcc 11.5.0, debug | 348 cases, 513 279 checks, 0 failures |
+| gcc 11.5.0, release | 348 cases, 513 279 checks, 0 failures |
 
 All four runs produce **byte-identical output**.
 

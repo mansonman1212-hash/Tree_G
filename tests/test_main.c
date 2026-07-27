@@ -113,6 +113,7 @@ int main(int argc, char **argv) {
         { "geom/camera",     test_suite_camera },
         { "tree/profile",    test_suite_tree_profile },
         { "tree/graph",      test_suite_tree_graph },
+        { "tree/growth",     test_suite_tree_growth },
     };
     const char *filter = NULL;
     size_t i;
