@@ -1,4 +1,5 @@
 #include "tree_skin.h"
+#include "tree_bark.h"
 
 #include "../core/log.h"
 #include "../core/rng.h"
@@ -183,6 +184,11 @@ typedef struct SkinCtx {
     u32 *ring_b;
     u32 *ring_dup;   /* duplicated rim for a hard-edged cap                  */
     u64 ring_bytes;
+    /* Bark relief for the axis currently being swept. Held here rather than
+     * recomputed per ring because the lattice density has to be constant for the
+     * whole axis -- letting it follow the local radius would shear every ridge
+     * along the taper. */
+    BarkAxisField bark;
 } SkinCtx;
 
 static MeshMaterial material_for(const Organ *o, const TreeResolved *res) {
@@ -210,19 +216,35 @@ static u32 pack_wood_colour(const Organ *o, const TreeResolved *res, f32 maturit
     TgRng rng = tg_rng_substream(res->settings.seed, TG_RNG_MATERIAL_VARIATION,
                                  o->id, 0);
     f32 jitter = tg_rng_range(&rng, -0.035f, 0.035f);
-    f32 base = tg_lerpf(0.44f, 0.30f, maturity) + jitter;
+    f32 base = tg_lerpf(0.30f, 0.22f, maturity) + jitter;
     if ((o->flags & ORGAN_FLAG_DEAD) != 0) {
-        return mesh_pack_rgba(base * 0.85f, base * 0.80f, base * 0.72f, 1.0f);
+        /* Weathered deadwood: grey, and lighter than live bark, which is what
+         * makes a dead limb read as dead rather than as live wood in shadow. */
+        return mesh_pack_rgba(base * 1.25f, base * 1.20f, base * 1.08f, 1.0f);
     }
     if (o->type == ORGAN_ROOT_SEGMENT) {
-        return mesh_pack_rgba(base * 1.05f, base * 0.88f, base * 0.70f, 1.0f);
+        return mesh_pack_rgba(base * 1.15f, base * 0.92f, base * 0.68f, 1.0f);
     }
-    return mesh_pack_rgba(base, base * 0.90f, base * 0.80f, 1.0f);
+    /* YOUNG SHOOTS ARE NOT GREY.
+     *
+     * The previous ramp started at 0.44 and desaturated toward grey, and the
+     * rendered crown was full of pale sticks that read as dead twigs against the
+     * foliage -- the twigs are the majority of the wood surface by area, so getting
+     * their hue wrong miscolours the whole crown. A current-year shoot is olive to
+     * red-brown; bark darkens and greys as it matures, so the green component is
+     * suppressed with maturity rather than the red raised. */
+    {
+        f32 youth = 1.0f - tg_saturatef(maturity);
+        f32 red = base * (1.00f + 0.22f * youth);
+        f32 grn = base * (0.80f + 0.26f * youth);
+        f32 blu = base * (0.62f + 0.06f * youth);
+        return mesh_pack_rgba(red, grn, blu, 1.0f);
+    }
 }
 
 /* Emits one ring and writes its vertex indices into `dst`. */
 static TgResult emit_ring(SkinCtx *c, const Organ *o, Frame f, f32 radius,
-                          f32 s_along_organ, f32 s_param, u32 nseg,
+                          f32 s_along_organ, f32 s_param, f32 arc_m, u32 nseg,
                           u32 *dst) {
     SectionShape sh;
     MeshMaterial mat;
@@ -243,7 +265,23 @@ static TgResult emit_ring(SkinCtx *c, const Organ *o, Frame f, f32 radius,
     sh.ecc_angle = reaction_angle(f, c->res->profile->reaction_wood);
 
     mat = material_for(o, c->res);
-    maturity = (mat == MESH_MAT_BARK_MATURE) ? 1.0f : 0.0f;
+    /* CONTINUOUS maturity, from the bark model itself.
+     *
+     * This was briefly taken from the material -- 1.0 for MESH_MAT_BARK_MATURE and
+     * 0.0 otherwise -- and the consequence was that bark relief was completely
+     * INVISIBLE on the rendered trunk: the furrow depth is proportional to
+     * maturity, the trunk's material came back BARK_YOUNG, and so every furrow was
+     * exactly zero deep. A binary maturity also cannot express what the bark model
+     * exists to express, which is that maturity varies continuously up a trunk and
+     * out along a limb. */
+    (void)tree_bark_family_at(c->res, radius, &maturity);
+    /* Bark relief is only expressed on living wood. Dead branches lose their
+     * rhytidome to weathering and read as smooth or fibrous grey, not as a
+     * furrowed oak trunk, and giving a dead limb full bark was one of the things
+     * that made deadwood look like live wood painted grey. */
+    if ((o->flags & ORGAN_FLAG_DEAD) != 0 || o->type == ORGAN_ROOT_SEGMENT) {
+        maturity *= 0.25f;
+    }
 
     for (i = 0; i < nseg; ++i) {
         MeshVertex v;
@@ -254,9 +292,22 @@ static TgResult emit_ring(SkinCtx *c, const Organ *o, Frame f, f32 radius,
         V3 dir = frame_ring_dir(f, theta);
         u32 idx;
         TgResult res;
+        BarkSample bs;
+        f32 bark_mat_maturity = maturity;
 
         memset(&v, 0, sizeof v);
-        v.position = v3_add(f.origin, v3_scale(dir, r * cscale));
+        /* BARK IS A DISPLACEMENT OF THIS SURFACE, not a second shell.
+         *
+         * Adding a separate bark mesh over the wood would put two surfaces a
+         * millimetre apart, which z-fights and doubles the triangle count for a
+         * feature that is already only a radial offset. Displacing the tube's own
+         * rings means the furrows are in the silhouette, occlude correctly under
+         * grazing light, and cost nothing beyond the extra tessellation they need
+         * to be resolved. */
+        bs = tree_bark_sample(&c->bark, theta, arc_m, r * cscale,
+                              bark_mat_maturity);
+        v.position = v3_add(f.origin,
+                            v3_scale(dir, r * cscale + bs.displacement_m));
         /* A provisional radial normal. mesh_compute_normals replaces it from the
          * actual triangles; keeping something sane here means a failure in that
          * pass shows as slightly wrong shading rather than as a NaN. */
@@ -264,9 +315,25 @@ static TgResult emit_ring(SkinCtx *c, const Organ *o, Frame f, f32 radius,
         v.tangent = f.t;
         v.param = v2(s_param, (f32)i / (f32)nseg);
         v.color = pack_wood_colour(o, c->res, maturity);
+        /* Furrow floors are darker than ridge crests -- but only as much as the
+         * geometry justifies, because the ridges themselves are triangles and the
+         * colour must not be doing their work. */
+        if (c->bark.active) {
+            v.color = mesh_scale_rgba(v.color, 0.55f + 0.45f * bs.exposure);
+        }
         v.organ_id = o->id;
-        v.attrib = mesh_pack_attrib(mat, MESH_SECTION_WOOD, 0);
-        v.ao = 1.0f;
+        v.birth_step = o->created_step;
+        if (c->bark.active) {
+            /* Material and occlusion both follow the geometry rather than being
+             * painted on: the furrow floor IS deeper, so it IS more occluded, and
+             * the ambient term is a real geometric quantity here rather than a
+             * darkening factor chosen to look right. */
+            v.attrib = mesh_pack_attrib(bs.material, MESH_SECTION_WOOD, 0);
+            v.ao = 0.35f + 0.65f * bs.exposure;
+        } else {
+            v.attrib = mesh_pack_attrib(mat, MESH_SECTION_WOOD, 0);
+            v.ao = 1.0f;
+        }
 
         res = mesh_add_vertex(c->mesh, &v, &idx);
         if (res != TG_OK) { return res; }
@@ -372,6 +439,33 @@ static TgResult sweep_axis(SkinCtx *c, u32 axis_id) {
             id = next;
         }
         nseg = tree_skin_ring_segments(c->res, max_r);
+
+        /* BARK RELIEF DECIDES ITS OWN TESSELLATION.
+         *
+         * The relief has a feature size, and a surface cannot carry a feature it
+         * does not have samples for. Rather than raising the global ring count and
+         * paying for it on a hundred thousand twigs, the bark field reports what it
+         * needs and only the axes that actually carry relief -- on an 80-year
+         * broadleaf, the trunk and the primary limbs, of the order of a hundred
+         * axes -- are tessellated for it. */
+        {
+            BarkFamily fam;
+            f32 unused_maturity;
+            fam = tree_bark_family_at(c->res, max_r, &unused_maturity);
+            tree_bark_axis_setup(c->res, axis_id, max_r, fam, &c->bark);
+            if (axis->kind == AXIS_ROOT) {
+                /* Roots are underground and are inspected in cutaway, where the
+                 * relevant surface is the root's form, not its rhytidome. */
+                c->bark.active = false;
+            }
+            if (c->bark.active) {
+                u32 want = tree_bark_ring_segments(&c->bark);
+                if (want > nseg) {
+                    nseg = tg_min_u32(want, TS_MAX_RING_SEGMENTS);
+                }
+                c->out->bark_axes++;
+            }
+        }
     }
     if (nseg < c->out->min_ring_segments || c->out->min_ring_segments == 0) {
         c->out->min_ring_segments = nseg;
@@ -385,7 +479,7 @@ static TgResult sweep_axis(SkinCtx *c, u32 axis_id) {
 
         if (first) {
             r = emit_ring(c, o, frame_at(o, 0.0f), o->radius_base, 0.0f, 0.0f,
-                          nseg, c->ring_a);
+                          0.0f, nseg, c->ring_a);
             if (r != TG_OK) { return r; }
 
             /* Basal cap. For the trunk and for root axes this is a real end of
@@ -402,14 +496,32 @@ static TgResult sweep_axis(SkinCtx *c, u32 axis_id) {
             first = false;
         }
 
+        /* One ring per internode is right for a twig and far too coarse for a
+         * bark-bearing limb: an 18 m trunk in 106 rings cannot show a 6 cm ridge.
+         * The internode is therefore subdivided to whatever the relief needs, and
+         * to nothing more when there is no relief. */
+        {
+            f32 spacing = tree_bark_ring_spacing(&c->bark);
+            u32 sub = 1u;
+            u32 k;
+            if (c->bark.active && spacing > 1e-5f) {
+                sub = tg_clamp_u32((u32)(o->length / spacing + 0.999f), 1u, 64u);
+            }
+            for (k = 1u; k <= sub; ++k) {
+                f32 s_local = (f32)k / (f32)sub;
+                f32 rad = tg_lerpf(o->radius_base, o->radius_tip, s_local);
+                r = emit_ring(c, o, frame_at(o, s_local), rad, s_local,
+                              (axis_length_acc + o->length * s_local)
+                                  / total_length,
+                              axis_length_acc + o->length * s_local,
+                              nseg, c->ring_b);
+                if (r != TG_OK) { return r; }
+                r = mesh_stitch_rings(c->mesh, c->ring_a, c->ring_b, nseg, o->id);
+                if (r != TG_OK) { return r; }
+                memcpy(c->ring_a, c->ring_b, (size_t)nseg * sizeof(u32));
+            }
+        }
         axis_length_acc += o->length;
-        r = emit_ring(c, o, frame_at(o, 1.0f), o->radius_tip, 1.0f,
-                      axis_length_acc / total_length, nseg, c->ring_b);
-        if (r != TG_OK) { return r; }
-
-        r = mesh_stitch_rings(c->mesh, c->ring_a, c->ring_b, nseg, o->id);
-        if (r != TG_OK) { return r; }
-        memcpy(c->ring_a, c->ring_b, (size_t)nseg * sizeof(u32));
 
         last_organ = o;
         for (child = o->first_child; child != TG_INVALID_ID;) {

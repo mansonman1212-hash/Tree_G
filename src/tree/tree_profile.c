@@ -1026,6 +1026,23 @@ TgResult tree_profile_resolve(const TreeSettings *settings, TreeResolved *out) {
      * conifer gets every needle it asks for. max_leaves remains as a hard memory
      * cap behind it. */
     out->foliage_triangle_budget = qb.foliage_tris;
+    /* AN EVERGREEN SPENDS ITS BUDGET DIFFERENTLY, AND THE REASON IS OCCLUSION.
+     *
+     * A conifer's shoots are completely clothed in needles: the wood is invisible.
+     * Splitting the geometry budget the same way for both categories therefore
+     * spends it on a surface nobody can see and starves the one they can. The
+     * close-up capture made this unmistakable -- at 10.5% needle coverage the
+     * conifer's bole was hidden behind an opaque thicket of NAKED pale twigs, which
+     * is the exact inverse of what a spruce looks like.
+     *
+     * So an evergreen gets twice the foliage budget and coarser wood. This is a
+     * budget allocation, not a model change: the needles it does place are the same
+     * real geometry, and the shortfall is still reported. */
+    if (!p->deciduous) {
+        out->foliage_triangle_budget = qb.foliage_tris * 2u;
+        out->internode_geometry_scale = qb.internode_scale * 1.5f;
+        out->max_leaves = tg_max_u32(qb.max_leaves, 3500000u);
+    }
     /* BRANCH ORDER IS ALSO A LEVEL OF DETAIL.
      *
      * Longitudinal and circumferential detail can be reduced without changing

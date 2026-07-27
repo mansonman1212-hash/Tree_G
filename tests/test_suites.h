@@ -18,5 +18,6 @@ void test_suite_tree_graph(void);
 void test_suite_tree_growth(void);
 void test_suite_tree_mechanics(void);
 void test_suite_tree_foliage(void);
+void test_suite_tree_bark(void);
 
 #endif /* TG_TEST_SUITES_H */

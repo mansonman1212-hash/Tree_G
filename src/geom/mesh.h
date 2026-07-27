@@ -156,7 +156,18 @@ typedef struct MeshVertex {
     u32 organ_id;  /* index into the biological graph                        */
     u32 attrib;    /* material(8) | section(8) | flags(16)                   */
     f32 ao;        /* geometric ambient occlusion in [0,1], 1 = unoccluded   */
-    u32 _pad;      /* explicit; keeps the stride at 64                       */
+    /* Growth step at which the organ this vertex belongs to came into existence.
+     *
+     * This is what makes the construction replay a CLIP TEST rather than a rebuild.
+     * The directive requires that the tree can be observed being constructed from
+     * nothing; regenerating the mesh for every step of an eighty-step history would
+     * cost eighty full generations, whereas carrying the birth step per vertex lets
+     * a single static mesh be revealed progressively -- which also keeps the replay
+     * honest, because it is provably the SAME geometry at every stage rather than a
+     * sequence of separately generated trees.
+     *
+     * It occupies the slot that was explicit padding, so the stride is unchanged. */
+    u32 birth_step;
 } MeshVertex;
 
 TG_STATIC_ASSERT(sizeof(MeshVertex) == 64, "MeshVertex must be exactly 64 bytes");
@@ -176,6 +187,19 @@ static inline void mesh_unpack_rgba(u32 c, f32 *r, f32 *g, f32 *b, f32 *a) {
     if (g) { *g = (f32)((c >> 8) & 0xFFu) * inv; }
     if (b) { *b = (f32)((c >> 16) & 0xFFu) * inv; }
     if (a) { *a = (f32)((c >> 24) & 0xFFu) * inv; }
+}
+
+/* Scales a packed colour's RGB, leaving alpha alone. Used where the geometry
+ * itself justifies a darkening -- a furrow floor is genuinely more occluded -- so
+ * that the shading term and the geometry cannot disagree. */
+static inline u32 mesh_scale_rgba(u32 c, f32 k) {
+    u32 r = (u32)(tg_saturatef((f32)(c & 0xFFu) * (1.0f / 255.0f) * k) * 255.0f
+                  + 0.5f);
+    u32 g = (u32)(tg_saturatef((f32)((c >> 8) & 0xFFu) * (1.0f / 255.0f) * k)
+                  * 255.0f + 0.5f);
+    u32 b = (u32)(tg_saturatef((f32)((c >> 16) & 0xFFu) * (1.0f / 255.0f) * k)
+                  * 255.0f + 0.5f);
+    return r | (g << 8) | (b << 16) | (c & 0xFF000000u);
 }
 
 static inline u32 mesh_pack_attrib(MeshMaterial m, MeshSection s, u32 flags) {

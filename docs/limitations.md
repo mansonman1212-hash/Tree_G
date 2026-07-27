@@ -29,8 +29,9 @@ As of the current commit, the following exist as design decisions in
 
 - Geometry layer: junction meshing (branch unions are still interpenetrating
   tubes), BVH.
-- Tree layer: bark geometry, dormant buds and bud scales, leaf veins and midrib
-  relief, damage, build orchestration, construction stage records.
+- Tree layer: dormant buds and bud scales, leaf veins and midrib relief, damage,
+  build orchestration, construction stage records (the per-vertex birth step they
+  need now exists; nothing consumes it).
 - Render layer: Win32 platform, D3D12 device, raster PBR renderer, progressive
   renderer, lighting, picking.
 - App layer: UI, construction replay controls, inspection panels.
@@ -38,8 +39,9 @@ As of the current commit, the following exist as design decisions in
 - `build-and-run.cmd`.
 
 Now implemented, having been on this list: surface skinning (`tree_skin`), leaves
-and needles as real geometry (`tree_foliage`), the headless reference generator
-(`tools/refgen.c`) and the validation-capture rasteriser (`tools/swrast.c`).
+and needles as real geometry (`tree_foliage`), bark relief as real geometry
+(`tree_bark`), the headless reference generator (`tools/refgen.c`) and the
+validation-capture rasteriser (`tools/swrast.c`).
 
 ## 3. Implemented and verified
 
@@ -173,6 +175,61 @@ completely hidden in reality, which points at the fix -- an evergreen should spe
 far less of its budget on wood and far more on needles, because its wood is
 occluded. That rebalancing is not done.
 
+### Bark: relief as geometry, and what it took to see it
+
+Bark is a radial DISPLACEMENT of the wood tube's own rings, not a second shell and
+not a normal map. The directive forbids the map, and a map fails in three specific
+ways no texture resolution fixes: the silhouette stays a smooth cylinder, grazing
+light produces no real occlusion in the furrows, and there is no parallax so the
+ridges slide across the surface as the camera moves. A furrow 27 mm deep in the mesh
+does all three for free, and it appears in the silhouette, which is checkable.
+
+The field is hash-based value noise on a lattice that wraps at an INTEGER number of
+cells around the axis, terraced into flat crests and flat floors joined by steep
+walls, sheared so the ridges interlace rather than running as parallel stripes, and
+keyed longitudinally to absolute arc length so a ridge crosses internode boundaries
+unbroken. Material and ambient occlusion both follow the displacement, so the
+shading and the geometry cannot disagree.
+
+Four defects, each of which cost a render cycle to find and now has a test:
+
+- **The relief was there and invisible.** Maturity was taken from a binary material
+  flag, which returned BARK_YOUNG for the trunk, so every furrow was exactly zero
+  deep. A test now asserts that a 90-year trunk reports maturity above 0.5 and
+  peak-to-trough relief above 10 mm.
+- **The sample rate resolved the lattice, not the feature.** Two and a half samples
+  per cell is over two per lattice cell but under ONE per furrow, because the
+  shaping function confines a furrow to about a third of a cell. The rendered trunk
+  was smooth while carrying 27 mm of displacement. Now seven samples per cell
+  around and five along, with a test that checks the ratio.
+- **A power curve is not bark.** It gives a C1-smooth surface and the trunk read as
+  gentle vertical undulation. Terracing -- flat crest, steep wall, flat floor --
+  is what makes it read as split rhytidome.
+- **The field was not periodic.** A coarser octave sampled at 0.35x the base
+  coordinate with a period of cells/3 does not wrap: 13.9 mm of discontinuity down
+  the length of every trunk. The integer cell count is now chosen first and the
+  coordinate scale derived from it. The periodicity test found this in one run.
+
+Fissure scale follows radius as its square root, because the profile's feature size
+describes the trunk base and a primary limb is finely fissured where the bole is
+deeply ridged. With a fixed 6 cm feature only THREE axes of 82,437 were thick enough
+to carry relief at all.
+
+Relief is gated at 35 mm of radius, which on an 80-year broadleaf selects 22 axes of
+82,437 -- the bole and the major limbs. That is deliberate on both counts: a 3 cm
+oak branch is genuinely smooth, and restricting relief to the surfaces anybody
+inspects is what pays for sampling them well enough to see. At a 15 mm threshold the
+same tree put relief on 111 axes and cost 2.1 GB.
+
+### Construction replay: the data exists, the viewer does not
+
+Every mesh vertex now carries the growth step at which its organ came into being, in
+the slot that was explicit padding, so the stride is unchanged at 64 bytes. This is
+what makes the replay a CLIP TEST rather than a rebuild: revealing an eighty-step
+history by regenerating the tree at each step would cost eighty full generations, and
+worse, it would not be provably the same tree at each stage. Nothing consumes this
+yet -- the replay is a renderer and UI feature and neither exists.
+
 ### Remaining defects, stated plainly
 
 1. **Conifer self-shading mortality is zero.** Not merely low: no conifer shoot
@@ -211,7 +268,22 @@ occluded. That rebalancing is not done.
    botanical nodes into geometric internodes, and a shoot whose annual increment
    does not complete one geometric internode produces no laterals that year, so a
    draft tree branches slightly less than a reference tree at the finest orders.
-9. **Leaf veins and midrib relief do not exist.** The blade is a smooth shell. The
+9. **Bark relief is smooth-edged and lacks secondary detail.** It reads as
+   furrowed rhytidome but the ridges are rounded rather than cracked, and there are
+   no secondary fissures across a plate, no lenticels, no branch-scar collars and no
+   change of character at the buttress. The terracing gives a crease at the top of
+   each wall; genuinely fractured bark needs a second, finer field and the sampling
+   to carry it.
+10. **The conifer still reads as speckle at 22% needle coverage.** An evergreen now
+   gets twice the foliage budget and coarser wood -- justified by occlusion, since a
+   conifer's shoots are completely clothed and its wood invisible -- which took
+   coverage from 10.5% to 22.2% and 3.0 million needles. It is visibly better and
+   still not a spruce: at close range the naked pale twigs are what dominates.
+   Reaching full coverage means 13.5 million needles, 81 million triangles and about
+   4.4 GB, which is beyond what a single tree can be given.
+11. **The conifer mesh now exceeds the topology scratch limit too**, for the same
+   reason the 220-year broadleaf does, and is reported as NOT VALIDATED.
+12. **Leaf veins and midrib relief do not exist.** The blade is a smooth shell. The
    relief belongs in a leaf-detail pass that displaces this surface at high
    quality; an earlier attempt to carry a midrib in the blade's TOPOLOGY produced
    906 boundary edges and 1 057 non-manifold edges, which is the wrong place for

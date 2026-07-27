@@ -16,6 +16,7 @@
 #include "../src/tree/tree_mechanics.h"
 #include "../src/tree/tree_skin.h"
 #include "../src/tree/tree_foliage.h"
+#include "../src/tree/tree_bark.h"
 
 #include "img_png.h"
 #include "swrast.h"
@@ -108,6 +109,11 @@ typedef struct ViewSpec {
     bool depth;
     f32  distance_scale;  /* <1 moves in for a close-up                      */
     V3   focus_offset;    /* world offset applied to the pivot                */
+    /* When set, focus_offset is an ABSOLUTE world point rather than an offset.
+     * Needed because the bounds pivot of a mature tree sits ten metres up in the
+     * crown, so a close-up specified as an offset lands wherever the crown happens
+     * to be -- the first attempt at a bark view framed a twig. */
+    bool focus_absolute;
 } ViewSpec;
 
 static TgResult capture(const Built *b, const ViewSpec *vs, const char *prefix,
@@ -124,7 +130,8 @@ static TgResult capture(const Built *b, const ViewSpec *vs, const char *prefix,
     camera_init(&cam);
     camera_set_aspect(&cam, width, height);
     camera_frame_bounds_reset_angle(&cam, bb, vs->margin, vs->yaw, vs->pitch);
-    cam.pivot = v3_add(cam.pivot, vs->focus_offset);
+    if (vs->focus_absolute) { cam.pivot = vs->focus_offset; }
+    else { cam.pivot = v3_add(cam.pivot, vs->focus_offset); }
     if (vs->distance_scale > 0.0f && vs->distance_scale != 1.0f) {
         cam.distance *= vs->distance_scale;
     }
@@ -236,6 +243,12 @@ static void report(const Built *b, const char *label) {
            (double)b->mechanics.max_tip_deflection_m,
            b->mechanics.clamped_rotations, b->mechanics.segments_considered,
            b->mechanics.own_bend_upward);
+    printf("  bark       %u of %u axes carry relief, family %s -> %s, "
+           "feature %.3f m\n",
+           b->skin.bark_axes, b->skin.axes_meshed,
+           tree_bark_family_name(b->resolved.profile->bark_juvenile),
+           tree_bark_family_name(b->resolved.profile->bark_mature),
+           (double)b->resolved.bark_feature_size_m);
     printf("  surface    %llu vertices, %llu triangles, rings %u, "
            "ring segments %u..%u, collars %u\n",
            (unsigned long long)st.vertices, (unsigned long long)st.triangles,
@@ -281,26 +294,39 @@ static void report(const Built *b, const char *label) {
 int main(int argc, char **argv) {
     static const ViewSpec views[] = {
         { "front",      0.00f,  -0.10f, 0.06f, false, false, false, false, 1.0f,
-          { 0, 0, 0 } },
+          { 0, 0, 0 }, false },
         { "threequarter", -0.70f, -0.18f, 0.06f, false, false, false, false, 1.0f,
-          { 0, 0, 0 } },
+          { 0, 0, 0 }, false },
         { "side",      -1.5708f, -0.10f, 0.06f, false, false, false, false, 1.0f,
-          { 0, 0, 0 } },
+          { 0, 0, 0 }, false },
         { "top",        0.00f,  -1.45f, 0.06f, false, false, false, false, 1.0f,
-          { 0, 0, 0 } },
+          { 0, 0, 0 }, false },
         { "roots",     -0.70f,   0.55f, 0.10f, true,  false, false, false, 1.0f,
-          { 0, 0, 0 } },
+          { 0, 0, 0 }, false },
         { "crown",     -0.70f,  -0.25f, 0.04f, false, true,  false, false, 1.0f,
-          { 0, 0, 0 } },
+          { 0, 0, 0 }, false },
         { "trunkbase", -0.70f,  -0.05f, 0.02f, false, false, false, false, 0.10f,
-          { 0, 0, 0 } },
+          { 0, 0, 0 }, false },
+        /* BARK. The relief is 3 to 7 cm deep and the trunkbase view frames several
+         * metres, which puts a furrow at two or three pixels: measured relief of
+         * 74 mm peak-to-trough looked like a perfectly smooth cylinder. Bark cannot
+         * be judged without a view that resolves it, so this one frames roughly
+         * half a metre of bole at breast height. The pivot is raised because the
+         * bounds pivot sits at mid-tree, ten metres up in the crown. */
+        { "bark",      -0.70f,  -0.02f, 0.00f, false, false, false, false, 0.026f,
+          { 0.0f, 1.60f, 0.0f }, true },
+        { "barkwire",  -0.70f,  -0.02f, 0.00f, false, false, true,  false, 0.026f,
+          { 0.0f, 1.60f, 0.0f }, true },
         { "wireframe", -0.70f,  -0.18f, 0.06f, false, false, true,  false, 1.0f,
-          { 0, 0, 0 } },
+          { 0, 0, 0 }, false },
         { "depth",     -0.70f,  -0.18f, 0.06f, false, false, false, true,  1.0f,
-          { 0, 0, 0 } }
+          { 0, 0, 0 }, false }
     };
     const u32 width = 900, height = 1100;
     const char *out_dir = (argc > 1) ? argv[1] : "artifacts";
+    /* Optional prefix filter. Regenerating four mature trees takes minutes, and
+     * iterating on one surface should not require rebuilding all of them. */
+    const char *only = (argc > 2) ? argv[2] : NULL;
     u8 *rgb;
     SwTarget target;
     TgResult r;
@@ -351,6 +377,9 @@ int main(int argc, char **argv) {
         };
         u32 ci;
         for (ci = 0; ci < TG_COUNTOF(cases); ++ci) {
+            if (only != NULL && strcmp(only, cases[ci].prefix) != 0) {
+                continue;
+            }
             /* Sized so that appending the longest view suffix and ".png" to a
              * full-length prefix cannot truncate. gcc's -Wformat-truncation
              * proves this rather than trusting it. */

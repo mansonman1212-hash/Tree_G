@@ -48,6 +48,7 @@ typedef struct SkinResult {
     u32 min_ring_segments;
     u32 max_ring_segments;
     u32 collars_applied;
+    u32 bark_axes;                /* axes thick enough to carry bark relief   */
     u32 interpenetrating_unions;  /* honest count of the interim state above  */
     u32 hard_corner_violations;   /* from the normal pass; should be 0        */
     bool hit_vertex_limit;

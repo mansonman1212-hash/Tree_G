@@ -227,9 +227,19 @@ static void test_thinning_is_uniform(void) {
      * would spend the whole budget on the oldest wood and leave the outer crown --
      * the part anybody looks at -- bald. This measures the placed fraction in the
      * lower and upper halves of the crown and requires them to agree. */
-    TG_EXPECT_OK(build(&b, TREE_CATEGORY_CONIFER, 30.0f, QUALITY_DRAFT,
+    /* Age 55 rather than 30. An evergreen now receives twice the foliage budget --
+     * its wood is completely occluded by needles, so spending the geometry on the
+     * wood was spending it on a surface nobody can see -- and at 30 years the whole
+     * demand of 1.57 million needles fits inside it, so there was no thinning left
+     * to measure. At 55 the tree asks for 5.9 million and the budget is the limit,
+     * which is the condition this test exists for. */
+    TG_EXPECT_OK(build(&b, TREE_CATEGORY_CONIFER, 55.0f, QUALITY_DRAFT,
                        SEASON_SUMMER, false));
-    TG_EXPECT(b.foliage.leaves_placed < b.foliage.leaves_wanted);
+    TG_EXPECT_MSG(b.foliage.leaves_placed < b.foliage.leaves_wanted,
+                  "%llu of %llu placed: nothing was thinned, so uniformity of "
+                  "thinning cannot be measured",
+                  (unsigned long long)b.foliage.leaves_placed,
+                  (unsigned long long)b.foliage.leaves_wanted);
 
     for (i = 0; i < tree_graph_organ_count(&b.graph); ++i) {
         const Organ *o = tree_graph_organ(&b.graph, i);
