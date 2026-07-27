@@ -10,5 +10,6 @@ void test_suite_mem(void);
 void test_suite_math(void);
 void test_suite_rng(void);
 void test_suite_hash(void);
+void test_suite_mesh(void);
 
 #endif /* TG_TEST_SUITES_H */

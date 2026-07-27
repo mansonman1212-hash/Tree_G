@@ -82,6 +82,20 @@ static void backing_free(void *p, u64 bytes) {
 }
 
 /* ------------------------------------------------------------------------- */
+/* Raw accounted allocation                                                  */
+/* ------------------------------------------------------------------------- */
+
+void *tg_alloc(u64 bytes) { return backing_alloc(bytes); }
+
+void *tg_alloc_zero(u64 bytes) {
+    void *p = backing_alloc(bytes);
+    if (p != NULL) { memset(p, 0, (size_t)bytes); }
+    return p;
+}
+
+void tg_free(void *p, u64 bytes) { backing_free(p, bytes); }
+
+/* ------------------------------------------------------------------------- */
 /* Arena                                                                     */
 /* ------------------------------------------------------------------------- */
 

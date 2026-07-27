@@ -56,7 +56,10 @@ CORE_SOURCES=(
     "src/core/rng.c"
 )
 
-GEOM_SOURCES=()
+GEOM_SOURCES=(
+    "src/geom/mesh.c"
+    "src/geom/mesh_validate.c"
+)
 TREE_SOURCES=()
 
 TEST_SOURCES=(
@@ -65,6 +68,7 @@ TEST_SOURCES=(
     "tests/test_math.c"
     "tests/test_rng.c"
     "tests/test_hash.c"
+    "tests/test_mesh.c"
 )
 
 # -------------------------------------------------------------------------

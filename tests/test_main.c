@@ -52,11 +52,26 @@ typedef struct Suite {
 } Suite;
 
 static void run_suite(const Suite *s) {
+    u64 live_before, live_after;
+
     g_current_suite = s->name;
     g_suite_failures_at_start = tg_test_failures;
+    live_before = tg_mem_stats().live_bytes;
     printf("== %-22s ", s->name);
     fflush(stdout);
     s->fn();
+
+    /* Per-suite leak attribution. A single global gate at the end tells you
+     * something leaked; this tells you which suite, which is the difference
+     * between a five-minute fix and an afternoon of bisecting. */
+    live_after = tg_mem_stats().live_bytes;
+    if (live_after != live_before) {
+        tg_test_case("suite released everything it allocated");
+        tg_test_report_failure(__FILE__, __LINE__,
+                               "suite leaked %lld bytes",
+                               (long long)live_after - (long long)live_before);
+    }
+
     if (tg_test_failures == g_suite_failures_at_start) {
         printf("ok\n");
     } else {
@@ -86,6 +101,7 @@ int main(int argc, char **argv) {
         { "core/math3d",     test_suite_math },
         { "core/rng",        test_suite_rng },
         { "core/hash",       test_suite_hash },
+        { "geom/mesh",       test_suite_mesh },
     };
     const char *filter = NULL;
     size_t i;

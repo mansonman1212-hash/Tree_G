@@ -44,6 +44,20 @@ void tg_mem_set_failure_after(u64 n);
 u64  tg_mem_failure_countdown(void);
 
 /* --------------------------------------------------------------------------
+ * Raw accounted allocation.
+ *
+ * For short-lived scratch buffers whose size is known at the call site and
+ * which do not fit an arena's lifetime (for example a per-section normal
+ * accumulation buffer). Routed through the same funnel as everything else so
+ * that accounting, the single-allocation cap, and failure injection all apply.
+ * Never call malloc/free directly anywhere in the engine.
+ * -------------------------------------------------------------------------- */
+void *tg_alloc(u64 bytes);
+void *tg_alloc_zero(u64 bytes);
+/* `bytes` must be the size originally requested; it is required for accounting. */
+void  tg_free(void *p, u64 bytes);
+
+/* --------------------------------------------------------------------------
  * Arena.
  * -------------------------------------------------------------------------- */
 typedef struct TgArenaBlock TgArenaBlock;
