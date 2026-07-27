@@ -88,6 +88,10 @@ typedef struct GrowthResult {
     u32 stopped_by_height;      /* reached the target height                  */
     u32 stopped_by_envelope;    /* reached the crown surface                  */
     u32 stopped_by_shade;       /* self-pruned after prolonged suppression    */
+    /* Shed because the live crown base rose past them: crown recession. Counted
+     * separately from shade because the two are different mechanisms and a bole
+     * that fails to clean itself has to be attributable to one of them. */
+    u32 stopped_by_recession;
     u32 starved_steps;          /* step-instances with too little resource     */
     u32 extension_steps;        /* step-instances that actually extended       */
 

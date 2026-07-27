@@ -15,6 +15,7 @@
 #include "../src/tree/tree_growth.h"
 #include "../src/tree/tree_mechanics.h"
 #include "../src/tree/tree_skin.h"
+#include "../src/tree/tree_foliage.h"
 
 #include "img_png.h"
 #include "swrast.h"
@@ -29,6 +30,7 @@ typedef struct Built {
     GrowthResult     growth;
     MechanicsResult  mechanics;
     SkinResult       skin;
+    FoliageResult    foliage;
     Mesh             mesh;
     MeshValidateReport validation;
     bool             valid;
@@ -59,6 +61,9 @@ static TgResult build_tree(Built *b, TreeCategory cat, f32 age, TreeQuality q,
     r = mesh_init(&b->mesh, 1u << 16, 1u << 17);
     if (r != TG_OK) { return r; }
     r = tree_skin_build(&b->mesh, &b->graph, &b->resolved, &b->skin);
+    if (r != TG_OK) { return r; }
+    r = tree_foliage_build(&b->mesh, &b->graph, &b->resolved,
+                           (u16)b->resolved.growth_steps, &b->foliage);
     if (r != TG_OK) { return r; }
     r = mesh_finalize(&b->mesh);
     if (r != TG_OK) { return r; }
@@ -208,6 +213,8 @@ static void report(const Built *b, const char *label) {
            b->growth.steps_run, b->resolved.growth_steps,
            b->growth.hit_organ_limit ? " (TRUNCATED: organ ceiling reached)" : "",
            b->growth.shoots_killed, b->growth.stopped_by_envelope);
+    printf("             shed: %u by shade, %u by crown recession\n",
+           b->growth.stopped_by_shade, b->growth.stopped_by_recession);
     printf("  graph      %s | %u organs, %u axes, %u segments, %u buds, "
            "%u dead, max order %u\n",
            gr.passed ? "VALID" : "INVALID",
@@ -246,6 +253,21 @@ static void report(const Built *b, const char *label) {
            b->validation.closed_components[MESH_SECTION_WOOD],
            (unsigned long long)b->validation.boundary_edges[MESH_SECTION_WOOD],
            b->validation.enclosed_volume[MESH_SECTION_WOOD]);
+    printf("  foliage    %llu of %llu %s placed (%.1f%%), %u tris each, "
+           "%u bearing shoots\n",
+           (unsigned long long)b->foliage.leaves_placed,
+           (unsigned long long)b->foliage.leaves_wanted,
+           b->resolved.profile->category == TREE_CATEGORY_CONIFER ? "needles"
+                                                                  : "leaves",
+           b->foliage.leaves_wanted > 0u
+               ? 100.0 * (double)b->foliage.leaves_placed
+                       / (double)b->foliage.leaves_wanted
+               : 0.0,
+           b->foliage.triangles_per_leaf, b->foliage.bearing_segments);
+    printf("  leaf area  %.1f m2 realised on the geometry placed, "
+           "%.1f m2 assumed by the mechanics for the full crown\n",
+           (double)b->foliage.realised_leaf_area_m2,
+           (double)b->foliage.target_leaf_area_m2);
     printf("  interim    %u unions are interpenetrating tubes (junction meshing "
            "not yet implemented)\n", b->skin.interpenetrating_unions);
     if (!b->valid) { mesh_validate_log_report(&b->validation); }

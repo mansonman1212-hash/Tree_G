@@ -214,6 +214,15 @@ typedef struct TreeProfile {
     f32 maturity_age_years;
     f32 juvenile_height_rate;      /* m/year early, before saturation        */
     f32 crown_width_ratio;         /* mature crown width / height            */
+    /* Crown envelope fullness above and below the widest point, as the exponent
+     * of a super-ellipse quadrant: 1.0 is a straight taper (a cone), 2.0 a
+     * circular arc, above 2 progressively fuller and flatter. This is what
+     * separates a conifer's spire from a broadleaf's dome, and it is a shape
+     * parameter rather than a fudge: the previous fixed pair of powers rendered
+     * the broadleaf as a pointed lozenge. */
+    f32 crown_lower_fullness;
+    f32 crown_upper_fullness;
+
     /* Height fraction where the crown is widest. Broadleaf ~0.5 (rounded),
      * conifer ~0.05 (conical, widest at the base). */
     f32 crown_widest_at;
@@ -376,6 +385,9 @@ typedef struct TreeResolved {
     /* Highest branch order this quality level will grow, already clamped to the
      * profile's own limit. Growth must consult THIS, not the profile. */
     u32 max_branch_order;
+    /* Total triangles the foliage pass may spend. See the resolve function for
+     * why foliage is budgeted in triangles rather than in leaves. */
+    u64 foliage_triangle_budget;
 } TreeResolved;
 
 /* Combines profile + settings + seed into the resolved individual. Pure: no

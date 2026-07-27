@@ -1,4 +1,5 @@
 #include "tree_mechanics.h"
+#include "tree_foliage.h"
 
 #include "../core/log.h"
 
@@ -69,17 +70,11 @@ f32 tree_mechanics_segment_leaf_area(const Organ *o, const TreeResolved *r,
     per_metre = p->leaves_per_metre_of_shoot;
     if (!(per_metre > 0.0f)) { return 0.0f; }
 
-    if (p->category == TREE_CATEGORY_CONIFER) {
-        /* Projected one-sided area of a needle, treated as a long rectangle. */
-        area_each = p->needle_length_m * p->needle_width_m;
-    } else {
-        /* An oak-like lobed blade fills roughly two thirds of its bounding
-         * rectangle; the factor is a stated approximation, not a measurement. */
-        area_each = p->leaf_length_m * p->leaf_length_m * p->leaf_width_ratio
-                  * 0.65f;
-    }
-    /* leaf_scale is a linear size multiplier, so it enters area squared. */
-    area_each *= r->leaf_scale * r->leaf_scale;
+    /* ONE definition of a leaf's area, integrated from the blade the foliage pass
+     * will actually build, including leaf_scale. Duplicating it here with a stated
+     * fill factor put this pass 2.5x above the geometry, so the tree bent under
+     * leaves that did not exist. */
+    area_each = tree_foliage_unit_area(r);
 
     return o->length * per_metre * area_each * r->foliage_density;
 }

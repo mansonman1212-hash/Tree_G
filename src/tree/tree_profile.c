@@ -211,6 +211,7 @@ static const TreeProfile g_broadleaf[] = {
         140.0f,                         /* maturity_age_years                */
         0.43f,                          /* juvenile_height_rate m/yr         */
         1.15f,                          /* crown_width_ratio: wider than tall */
+        2.40f, 2.60f,                   /* crown fullness: full dome, both ways */
         0.52f,                          /* crown_widest_at: rounded crown    */
         0.28f,                          /* crown_base_height_ratio           */
 
@@ -289,7 +290,13 @@ static const TreeProfile g_broadleaf[] = {
         0.115f,                         /* leaf_length_m                     */
         0.62f,                          /* leaf_width_ratio                  */
         0.00022f,                       /* leaf_thickness_m                  */
-        28.0f,                          /* leaves_per_metre_of_shoot         */
+        /* 42 leaves per metre of current-year shoot, i.e. one every 2.4 cm. The
+         * previous 28 was defensible per-shoot but produced a measured crown leaf
+         * area index of 1.5 against the 4 to 6 a closed broadleaf crown shows, and
+         * the rendered crown read as green speckle with sky through it rather than
+         * as foliage. A beech or oak long shoot bears leaves every 1.5 to 3 cm, so
+         * this is the same botany read at the other end of its range. */
+        42.0f,                          /* leaves_per_metre_of_shoot         */
         0.0f, 0.0f                      /* needle dimensions: n/a            */
     }
 };
@@ -317,6 +324,7 @@ static const TreeProfile g_conifer[] = {
         110.0f,
         0.71f,
         0.36f,                          /* crown_width_ratio: narrow cone     */
+        1.60f, 1.00f,                   /* crown fullness: straight cone above */
         0.06f,                          /* crown_widest_at: near the base      */
         0.10f,                          /* crown_base_height_ratio: low skirt  */
 
@@ -517,6 +525,10 @@ TgResult tree_profile_validate(const TreeProfile *p) {
     TP_REQUIRE(p->crown_width_ratio > 0.0f, "non-positive crown width ratio");
     TP_REQUIRE(p->crown_widest_at >= 0.0f && p->crown_widest_at <= 1.0f,
                "crown_widest_at outside [0,1]");
+    TP_REQUIRE(p->crown_lower_fullness >= 0.6f && p->crown_lower_fullness <= 6.0f,
+               "crown_lower_fullness outside [0.6,6]");
+    TP_REQUIRE(p->crown_upper_fullness >= 0.6f && p->crown_upper_fullness <= 6.0f,
+               "crown_upper_fullness outside [0.6,6]");
     TP_REQUIRE(p->crown_base_height_ratio >= 0.0f &&
                p->crown_base_height_ratio < 1.0f,
                "crown_base_height_ratio outside [0,1)");
@@ -655,15 +667,33 @@ f32 tree_resolved_envelope_radius(const TreeResolved *r, f32 height_m) {
          / tg_maxf(h - r->crown_base_height_m, 1e-4f);
     peak = tg_clampf(peak, 0.02f, 0.98f);
 
-    /* Two half-profiles meeting at the widest point, so a conical conifer
-     * (peak near 0) and a rounded broadleaf (peak near 0.5) come out of the same
-     * expression without a special case. The 0.7 exponent below the peak makes
-     * the lower crown fill out convexly; the 1.4 above it tapers concavely
-     * toward the leader, which is what gives a conifer its spire. */
-    if (t <= peak) {
-        radius = powf(t / peak, 0.7f);
-    } else {
-        radius = powf((1.0f - t) / (1.0f - peak), 1.4f);
+    /* SUPER-ELLIPSE QUADRANTS, one above the widest point and one below.
+     *
+     * radius = (1 - u^p)^(1/p) on each side, where u runs 0 at the widest point to
+     * 1 at the crown's end. The single exponent p is the whole shape: p = 1 is a
+     * straight line and therefore a cone, p = 2 a circle, p > 2 progressively
+     * fuller and flatter.
+     *
+     * The previous form was a pair of plain powers, t^0.7 below and (1-t)^1.4
+     * above. Rendered, that gave the broadleaf a LOZENGE -- pointed top, pointed
+     * bottom, widest at a hard shoulder in the middle -- which is not a shape any
+     * decurrent broadleaf has. The super-ellipse fixes it with a parameter that
+     * means something: the conifer keeps p = 1.0 above the widest point and comes
+     * to a real spire, while the broadleaf's 2.6 gives the flattened dome an oak
+     * actually presents. */
+    {
+        f32 p_low = tg_clampf(r->profile->crown_lower_fullness, 0.6f, 6.0f);
+        f32 p_up  = tg_clampf(r->profile->crown_upper_fullness, 0.6f, 6.0f);
+        f32 u, pw;
+        if (t <= peak) {
+            u = 1.0f - t / peak;
+            pw = p_low;
+        } else {
+            u = (t - peak) / (1.0f - peak);
+            pw = p_up;
+        }
+        u = tg_saturatef(u);
+        radius = powf(tg_maxf(1.0f - powf(u, pw), 0.0f), 1.0f / pw);
     }
     return radius * r->crown_width_m * 0.5f;
 }
@@ -732,6 +762,7 @@ typedef struct QualityBudget {
     u32 max_organs;
     f32 internode_scale;
     u32 order_cap;
+    u64 foliage_tris;
 } QualityBudget;
 
 static QualityBudget quality_budget(TreeQuality q) {
@@ -768,20 +799,24 @@ static QualityBudget quality_budget(TreeQuality q) {
     case QUALITY_DRAFT:
         b.seg_min = 8;  b.seg_max = 20;  b.max_leaves = 2000;
         b.leaf_tris = 40;   b.bark_feature_m = 0.060f; b.max_organs = 1400000;
-        b.internode_scale = 7.0f; b.order_cap = 32u; break;
+        b.max_leaves = 1200000; b.foliage_tris = 9000000u;
+        b.internode_scale = 9.0f; b.order_cap = 32u; break;
     case QUALITY_STANDARD:
         b.seg_min = 12; b.seg_max = 40;  b.max_leaves = 20000;
-        b.leaf_tris = 140;  b.bark_feature_m = 0.024f; b.max_organs = 2400000;
+        b.leaf_tris = 60;   b.bark_feature_m = 0.024f; b.max_organs = 2400000;
+        b.max_leaves = 1500000; b.foliage_tris = 8000000u;
         b.internode_scale = 3.0f; b.order_cap = 32u; break;
     case QUALITY_HIGH:
         b.seg_min = 18; b.seg_max = 72;  b.max_leaves = 70000;
-        b.leaf_tris = 340;  b.bark_feature_m = 0.011f; b.max_organs = 4000000;
+        b.leaf_tris = 84;   b.bark_feature_m = 0.011f; b.max_organs = 4000000;
+        b.max_leaves = 5000000; b.foliage_tris = 24000000u;
         b.internode_scale = 1.6f; b.order_cap = 32u; break;
     case QUALITY_REFERENCE:
     case TREE_QUALITY_COUNT:
     default:
         b.seg_min = 24; b.seg_max = 128; b.max_leaves = 220000;
-        b.leaf_tris = 780;  b.bark_feature_m = 0.005f; b.max_organs = 6000000;
+        b.leaf_tris = 108;  b.bark_feature_m = 0.005f; b.max_organs = 6000000;
+        b.max_leaves = 12000000; b.foliage_tris = 60000000u;
         b.internode_scale = 1.0f; b.order_cap = 32u; break;
     }
     return b;
@@ -979,6 +1014,18 @@ TgResult tree_profile_resolve(const TreeSettings *settings, TreeResolved *out) {
     out->bark_feature_size_m = qb.bark_feature_m;
     out->max_organs = qb.max_organs;
     out->internode_geometry_scale = qb.internode_scale;
+    /* FOLIAGE IS BUDGETED IN TRIANGLES, NOT IN LEAVES.
+     *
+     * A blade costs 32 triangles at draft and a needle 6, so a count-based budget
+     * spends five times as much geometry on a broadleaf leaf as on a needle and
+     * then wonders why the conifer is bald. Measured demand: an 80-year broadleaf
+     * wants 134,000 leaves and an 80-year conifer 10,026,000 needles -- the
+     * conifer is not an error, a real spruce carries tens of millions. Dividing a
+     * triangle budget by the per-unit cost gives each category what it can
+     * actually use: at draft, 62,000 leaves or 333,000 needles; at reference the
+     * conifer gets every needle it asks for. max_leaves remains as a hard memory
+     * cap behind it. */
+    out->foliage_triangle_budget = qb.foliage_tris;
     /* BRANCH ORDER IS ALSO A LEVEL OF DETAIL.
      *
      * Longitudinal and circumferential detail can be reduced without changing

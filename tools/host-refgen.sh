@@ -33,6 +33,7 @@ SOURCES=(
     "src/geom/camera.c"
     "src/tree/tree_profile.c" "src/tree/tree_graph.c" "src/tree/tree_growth.c"
     "src/tree/tree_mechanics.c" "src/tree/tree_skin.c"
+    "src/tree/tree_foliage.c"
     "tools/img_png.c" "tools/swrast.c" "tools/refgen.c"
 )
 

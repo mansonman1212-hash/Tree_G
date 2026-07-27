@@ -972,6 +972,43 @@ TgResult tree_growth_run(TreeGraph *graph, const TreeResolved *resolved,
         r = rebuild_density(&c);
         if (r != TG_OK) { goto done; }
 
+        /* 0. CROWN RECESSION, swept over the whole graph.
+         *
+         * The live crown base rises as the tree grows and the branches left below
+         * it are shed. This has to be a sweep rather than a test inside the
+         * extension loop, and that was learned by measurement: tested only on
+         * ACTIVE shoots it fired 1,041 times on a 118,000-axis tree, because a low
+         * branch normally stopped extending years before the crown base reached it
+         * and was therefore never looked at again. The rendered tree still carried
+         * its crown to within 2 m of the ground against a resolved crown base of
+         * 5.26 m.
+         *
+         * Cost is one pass over the organs per step, the same order as the density
+         * rebuild that precedes it, and it only ever finds NEW victims because
+         * death is permanent.
+         *
+         * The trunk is exempt by definition -- it is what the bole is made of --
+         * and so are roots. Wood is retained as dead branch rather than deleted,
+         * because a shed limb leaves a stub and eventually a branch scar. */
+        {
+            f32 dev = tg_clampf(c.current_height
+                                    / tg_maxf(r_local.height_m, 0.01f),
+                                0.05f, 1.0f);
+            f32 recess_h = r_local.crown_base_height_m * dev;
+            u32 oi, on = tree_graph_organ_count(graph);
+            for (oi = 0; oi < on; ++oi) {
+                const Organ *o = tree_graph_organ(graph, oi);
+                if (o->branch_order == 0u) { continue; }
+                if (o->type != ORGAN_BRANCH_SEGMENT
+                        && o->type != ORGAN_TWIG_SEGMENT) { continue; }
+                if ((o->flags & ORGAN_FLAG_DEAD) != 0) { continue; }
+                if (o->base.y >= recess_h) { continue; }
+                st.shoots_killed += tree_graph_kill_subtree(graph, oi, step,
+                                                        ORGAN_FLAG_BARK_RETAINED);
+                if (out_result != NULL) { out_result->stopped_by_recession++; }
+            }
+        }
+
         /* 1. light for every active apex */
         n = (u32)c.shoots.count;
         for (i = 0; i < n; ++i) {
@@ -1051,6 +1088,15 @@ TgResult tree_growth_run(TreeGraph *graph, const TreeResolved *resolved,
 
             if (!s->active) { continue; }
             axis_snapshot = tree_graph_axis(graph, i);
+            /* The recession sweep above may have killed this axis's wood. A shoot
+             * cannot extend from a dead branch, and without this check it would go
+             * on adding live segments to a shed limb. */
+            if (axis_snapshot->first_organ != TG_INVALID_ID
+                    && (tree_graph_organ(graph, axis_snapshot->first_organ)->flags
+                        & ORGAN_FLAG_DEAD) != 0) {
+                s->active = false;
+                continue;
+            }
             order = axis_snapshot->order;
             res = s->resource;
             pos = axis_snapshot->tip_position;

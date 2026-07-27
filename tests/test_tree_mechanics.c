@@ -560,10 +560,21 @@ static void test_deflection_behaviour(void) {
         TG_EXPECT_OK(tree_growth_run(&gs, &rs, NULL, &gr));
         TG_EXPECT_OK(tree_growth_roots(&gs, &rs, NULL, &gr));
         TG_EXPECT_OK(tree_mechanics_run(&gs, &rs, &ms));
-        TG_EXPECT_MSG(ms.max_segment_rotation_rad < m.max_segment_rotation_rad,
-                      "50x stiffer wood bent %.5f rad vs %.5f rad",
-                      (double)ms.max_segment_rotation_rad,
-                      (double)m.max_segment_rotation_rad);
+        /* NOT max_segment_rotation_rad. That statistic SATURATES: the stability
+         * clamp caps any single segment at 0.2 rad, and on a mature tree both the
+         * stiff and the compliant run have at least one segment against the cap, so
+         * the comparison read 0.20000 < 0.20000 and failed while the modulus was
+         * working perfectly. A test has to measure something that can still move.
+         *
+         * Two that can: how MANY segments reach the cap, and how far the tips
+         * actually travel. Fifty times stiffer wood must reduce both. */
+        TG_EXPECT_MSG(ms.clamped_rotations < m.clamped_rotations,
+                      "50x stiffer wood still clamped %u segments against %u",
+                      ms.clamped_rotations, m.clamped_rotations);
+        TG_EXPECT_MSG(ms.max_tip_deflection_m < m.max_tip_deflection_m,
+                      "50x stiffer wood deflected %.4f m vs %.4f m",
+                      (double)ms.max_tip_deflection_m,
+                      (double)m.max_tip_deflection_m);
         tree_graph_destroy(&gs);
     }
 

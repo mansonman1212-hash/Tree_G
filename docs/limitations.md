@@ -27,15 +27,19 @@ Consequences, stated plainly:
 As of the current commit, the following exist as design decisions in
 `docs/research.md` and `docs/architecture.md` and as nothing else:
 
-- Geometry layer: junction meshing, BVH.
-- Tree layer: bark, leaves, needles, damage, build orchestration, construction
-  stage records.
+- Geometry layer: junction meshing (branch unions are still interpenetrating
+  tubes), BVH.
+- Tree layer: bark geometry, dormant buds and bud scales, leaf veins and midrib
+  relief, damage, build orchestration, construction stage records.
 - Render layer: Win32 platform, D3D12 device, raster PBR renderer, progressive
   renderer, lighting, picking.
 - App layer: UI, construction replay controls, inspection panels.
 - HLSL shaders.
 - `build-and-run.cmd`.
-- Headless reference generator and validation-capture rasteriser.
+
+Now implemented, having been on this list: surface skinning (`tree_skin`), leaves
+and needles as real geometry (`tree_foliage`), the headless reference generator
+(`tools/refgen.c`) and the validation-capture rasteriser (`tools/swrast.c`).
 
 ## 3. Implemented and verified
 
@@ -101,80 +105,130 @@ single lookup.
 
 ### Where the trees stand now
 
-| Quantity | Broadleaf 80 yr | Conifer 80 yr | Broadleaf 12 yr |
+| Quantity | Broadleaf 80 yr | Conifer 80 yr | Broadleaf 220 yr |
 |---|---|---|---|
-| Growth steps completed | 80 of 80 | 80 of 80 | 12 of 12 |
-| Organs / axes | 614 133 / 97 108 | 614 844 / 75 351 | 548 / 129 |
-| Shoot segments | 517 056 | 539 521 | 447 |
-| Living terminal shoots | 64 361 | 68 915 | 68 |
-| Leaf area | 717 m2 | 385 m2 | 1.2 m2 |
-| Realised height | 17.93 m (target 18.79) | 26.80 m (target 27.29) | 4.61 m (target 4.60) |
-| Trunk base radius | 0.260 m | 0.341 m | 0.064 m |
-| Wood mass | 2 481 kg | 2 283 kg | 18 kg |
-| Max branch order | 8 | 3 | 5 |
-| Self-pruned shoots | 92 618 (15.1% of organs) | 0 | 0 |
-| Mesh | VALID, 0 boundary edges | VALID, 0 boundary edges | VALID, 0 boundary edges |
-| Generation time | 2.3 s | 2.8 s | <0.01 s |
+| Growth steps completed | 80 of 80 | 80 of 80 | 220 of 220 |
+| Realised height | 18.93 m (target 18.79) | 26.88 m (target 27.29) | 25.16 m (target 24.99) |
+| Organs / axes | 492 361 / 86 559 | 776 648 / 92 738 | 1 190 126 / 169 542 |
+| Shed by shade / by recession | 14 050 / 36 | 0 / 1 344 | 53 918 / 91 |
+| Max branch order | 8 | 3 | 8 |
+| Wood triangles | 10 700 000 | 16 838 264 | 20 500 000 |
+| Foliage placed | 191 215 of 191 215 (100%) | 799 317 of 11 866 773 (6.7%) | 250 196 of 346 595 (72%) |
+| Leaf area on the geometry | 606.8 m2 | 29.0 m2 | 793.2 m2 |
+| Mesh | VALID, 0 boundary edges | VALID, 0 boundary edges | too large to validate |
+| CPU geometry | 851 MiB | 1 038 MiB | 1 617 MiB |
+| Generation time | ~3 s | ~4 s | ~9 s |
 
-Terminal shoots and leaf area are in the right order of magnitude for the first
-time: 64 361 living tips carrying 717 m2 of leaf, against 557 tips and 8 m2
-before. Realised height now matches the resolved target to within 5% because the
-leader is driven BY the height curve rather than coincidentally agreeing with it,
-and the 12-year tree lands within 0.01 m.
+Realised height now matches the resolved target to within 1-2% on all three,
+because the leader is driven BY the height curve rather than coincidentally
+agreeing with it. The 220-year individual completes its full history for the first
+time.
 
-717 m2 over a crown of roughly 19 m width is a leaf area index near 2.5, which is
-at the low end of the 4-7 a real closed broadleaf crown shows. So the crown is
-now the right order of magnitude and still somewhat too open -- a much better
-place to be than two orders of magnitude out, and the remaining factor is a
-calibration question rather than a structural one.
+606.8 m2 of leaf on an 18.9 m broadleaf is inside the 300-600 m2 range a mature
+open-grown oak shows. Over a crown 19.19 m wide that is a leaf area index near 2.1,
+against the 4-6 of a closed crown -- so the leaf area is right and the crown is
+wide. Whether the crown/height ratio in the profile is too generous is an open
+question and is listed below rather than quietly adjusted.
+
+### Foliage: what is real and what is budgeted
+
+Every leaf, petiole and needle is indexed triangle geometry. There are no alpha
+cards, no billboards and no textured quads anywhere: a blade is a lobed, cupped,
+drooping shell WITH THICKNESS and a distinguishable upper and lower face, and a
+needle is a closed tapered prism. The mesh validator confirms it rather than the
+comment: the leaf section has zero boundary edges, positive enclosed volume, and
+exactly two closed components per leaf (blade plus petiole). A card cannot pass any
+of those three.
+
+Three defects were found and fixed here, all of them by the validator or by
+measurement rather than by inspection:
+
+- **The mechanics and the geometry disagreed about what a leaf's area is.** The
+  mechanics assumed 0.65 of a blade's bounding rectangle; the generated blade
+  measured 0.25 of it. The tree was therefore bending under two and a half times
+  the foliage it contained. The area is now INTEGRATED from the same half-width
+  function the mesh is built from, at the same station count, so the two cannot
+  drift apart; a test asserts they agree within 8%, and they agree within 1%.
+- **The margin was aliased, not tessellated.** A five-lobed blade sampled at three
+  spanwise stations put its one interior sample in a sinus and came out with 15
+  times too little area. The margin frequency is now capped by the sample rate --
+  the same rule that governs ring segments around a branch -- so coarse blades lose
+  lobes instead of gaining noise.
+- **The blade wound inward.** 151 inverted components on a 151-leaf tree, which is
+  how a systematic winding error announces itself rather than a stray triangle.
+
+What IS budgeted is the count. An 80-year broadleaf wants 191 215 leaves and gets
+all of them at draft quality. An 80-year conifer wants 11 866 773 needles, which is
+not an error -- a real spruce carries tens of millions -- and 11.9 million needles
+is 71 million triangles. It gets 6.7% of them. Thinning is uniform over the crown
+(by a hash of each leaf's identity, so that graph order, which is acropetal, cannot
+leave the outer crown bald -- a test measures the placed fraction in each half of
+the crown), leaf SIZE is never inflated to compensate, and both numbers are printed
+on every run.
+
+The visible consequence is specific and worth stating: at 6.7% needle cover the
+conifer's silhouette is dominated by its own twigs rather than by foliage, so it
+renders pale grey-brown instead of dark green. For an evergreen the twigs are
+completely hidden in reality, which points at the fix -- an evergreen should spend
+far less of its budget on wood and far more on needles, because its wood is
+occluded. That rebalancing is not done.
 
 ### Remaining defects, stated plainly
 
-1. **Very old individuals still hit the organ ceiling.** A 220-year broadleaf
-   completes 107 of 220 steps at draft quality and reaches 20.0 m of a 24.99 m
-   target. The cause is that the model has no crown retrenchment: a real ancient
-   tree sheds its outer crown and its living shoot population reaches a steady
-   state, whereas this model accumulates axes indefinitely because shade mortality
-   (14%) never overtakes bud break. Raising the extinction coefficient does not
-   fix it -- tested at 0.055, 0.10, 0.16 and 0.24, the crown self-regulates through
-   reduced bud break instead of increased death, and total organs moved by under
-   15%. `hit_organ_limit` is reported on every run and `refgen` prints
-   `TRUNCATED` in the growth line.
-2. **Conifer self-shading mortality is zero.** Not merely low: no conifer shoot
-   dies. 36 469 shoots are pinned at the crown surface and none is ever
-   overtopped, so an 80-year conifer keeps every branch it ever grew, including
-   its lowest whorls. A real fir sheds its lower crown.
-3. **The conifer's upper leader is too bare.** The leader now tracks the height
-   curve and outruns its own laterals, leaving roughly the top quarter as an
-   almost naked spire.
-4. **The broadleaf crown silhouette still reads as its envelope.** The widest
-   point sits low and the top comes to a point, where a decurrent broadleaf should
-   be widest near mid-crown with a rounded, slightly flattened top.
-5. **Mesh size is far beyond a real-time budget.** An 80-year broadleaf skins to
-   roughly 11 million triangles and a 220-year one to 20.9 million, at 575 MiB and
-   1 156 MiB of CPU geometry. Every branch is a separate closed tube, so most of
-   those triangles are inside other triangles. `mesh_junction` (welding unions) and
-   a longitudinal mesh LOD are the next work, and until they exist the vertex count
-   should be read as an upper bound, not a target.
-6. **Mesh validation cannot run on the largest tree.** The 220-year case reports
-   `scratch_limit_exceeded` and is then printed as `INVALID`, which conflates
-   "failed validation" with "could not be validated". The report is wrong even
-   though the diagnosis is honest; the two states must be distinguished.
-7. **Quality levels are not purely a level of detail.** `internode_geometry_scale`
-   groups botanical nodes into geometric internodes, and because a shoot whose
-   annual increment does not complete one geometric internode produces no laterals
-   that year, a draft tree branches slightly less than a reference tree rather than
-   being the same tree drawn more coarsely. The difference is confined to the
-   finest orders, but it is a difference.
+1. **Conifer self-shading mortality is zero.** Not merely low: no conifer shoot
+   dies of shade. 41 056 shoots sit pinned at the crown surface and none is ever
+   overtopped. Its lower crown is now shed by crown recession (1 344 events)
+   instead, which cleans the skirt but is not the same mechanism.
+2. **Crown recession is prescribed, not emergent.** A shoot whose base falls below
+   the live crown base is shed. That is a real phenomenon and the live crown base
+   is a resolved property of the individual, but the shedding is imposed rather
+   than arising from shade -- because a low branch sits at the crown SURFACE, where
+   it is well lit, so the transmittance model quite correctly spares it. Before the
+   sweep existed the 80-year broadleaf carried its crown to within 2 m of the
+   ground against a resolved crown base of 5.26 m.
+3. **The conifer's upper leader is too bare.** The leader tracks the height curve
+   and outruns its own laterals, leaving roughly the top fifth an almost naked
+   spire.
+4. **The crown/height ratio may be too generous.** 19.19 m of crown on an 18.93 m
+   broadleaf gives a leaf area index of 2.1 where a closed crown shows 4-6. The
+   leaf area itself is correct, so either the crown is too wide or the tree should
+   carry more foliage-bearing shoot. Not adjusted, because guessing which would be
+   fitting one number by breaking another.
+5. **Mesh size is far beyond a real-time budget.** 10.7 to 20.5 million wood
+   triangles per tree at 851-1 617 MiB. Every branch is still a separate closed
+   tube, so a large fraction of those triangles are inside other triangles.
+   `mesh_junction` (welding unions) and a mesh-level LOD are the next work, and
+   until they exist the triangle count should be read as an upper bound.
+6. **Mesh validation cannot run on the largest tree.** The 220-year case exceeds
+   the topology scratch buffers. It is now reported as `NOT VALIDATED` rather than
+   `INVALID`, which was the previous behaviour and conflated "failed the checks"
+   with "was never checked".
+7. **Very old individuals no longer truncate, but only just.** The 220-year tree
+   completes all 220 steps at 1 190 126 organs against a 1 400 000 ceiling. It has
+   no crown retrenchment, so nothing bounds the accumulation from above; a
+   400-year individual would truncate again.
+8. **Quality is not a pure level of detail.** `internode_geometry_scale` groups
+   botanical nodes into geometric internodes, and a shoot whose annual increment
+   does not complete one geometric internode produces no laterals that year, so a
+   draft tree branches slightly less than a reference tree at the finest orders.
+9. **Leaf veins and midrib relief do not exist.** The blade is a smooth shell. The
+   relief belongs in a leaf-detail pass that displaces this surface at high
+   quality; an earlier attempt to carry a midrib in the blade's TOPOLOGY produced
+   906 boundary edges and 1 057 non-manifold edges, which is the wrong place for
+   it.
 
 ### What was checked visually, and what it showed
 
 The CPU rasteriser was the instrument that made all of the above findable. The
 first captures after the flush rewrite showed a bare pole under a flat pancake of
-twigs -- a result that every numeric check had passed. The current captures show a
-dense rounded crown over a clean bole for the broadleaf and a clean cone with a
-single leader for the conifer, with the defects listed above visible on
-inspection.
+twigs -- a result that every numeric check had passed. Since then it has also caught the lozenge-shaped crown
+envelope (fixed by replacing a pair of plain powers with super-ellipse quadrants,
+which gave the broadleaf the flattened dome it should have and left the conifer its
+spire), the crown reaching to within 2 m of the ground, and the pale conifer.
+
+The current captures show a dense rounded crown of real leaves over a visible bole
+and root plate for the broadleaf, and a clean cone with a single leader for the
+conifer, with the defects listed above visible on inspection.
 
 ## 4. Tooling gaps in the development sandbox
 
