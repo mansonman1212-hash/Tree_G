@@ -28,8 +28,8 @@ As of the current commit, the following exist as design decisions in
 `docs/research.md` and `docs/architecture.md` and as nothing else:
 
 - Geometry layer: junction meshing, BVH.
-- Tree layer: mechanics (radii, sag, reaction wood), bark, leaves, needles,
-  damage, build orchestration, construction stage records.
+- Tree layer: bark, leaves, needles, damage, build orchestration, construction
+  stage records.
 - Render layer: Win32 platform, D3D12 device, raster PBR renderer, progressive
   renderer, lighting, picking.
 - App layer: UI, construction replay controls, inspection panels.
@@ -45,56 +45,86 @@ As of the current commit, the following exist as design decisions in
 Still missing from this layer: `mesh_junction` and `bvh`.
 
 **Layer 2 (tree), partial** — `tree_profile`, `tree_graph`, `tree_growth`
-(shoot system and root system). A deterministic, validated biological skeleton
-is generated for both categories. No geometry is produced yet: radii are unset
-and there is no surface.
+(shoot and root systems), `tree_mechanics` (foliage area, pipe-model radii,
+supported mass, static deflection, reaction-wood eccentricity, frame rebuild).
+A deterministic, validated skeleton with thickness and load response is produced
+for both categories. There is still no SURFACE: no cross-sections, no triangles.
 
-Verified by 348 test cases / 513 279 checks passing under clang and gcc, in
+Verified by 384 test cases / 532 366 checks passing under clang and gcc, in
 debug and release, with zero warnings under `-Werror` and an aggressive warning
 set, producing byte-identical output across all four configurations. Details and
 the specific failure modes each test targets are in `docs/testing.md`.
 
-## 3a. Measured behaviour of the growth simulation, and where it is not yet right
+## 3a. Measured behaviour, and the one gap that dominates everything
 
-Numbers below are measured on the current build: age 80, standard quality,
-open-grown environment, default seed.
+Numbers below are measured on the current build: standard quality, open-grown
+environment, default seed.
 
-| Quantity | Broadleaf | Conifer | Assessment |
-|---|---|---|---|
-| Shoot segments | 6 917 | 26 679 | plausible |
-| Realised height | 16.7 m (target 18.8 m) | 27.5 m (target 27.3 m) | acceptable; broadleaf 11% under |
-| Crown radius | 7.72 m (envelope 9.60 m) | 4.73 m (envelope 4.74 m) | broadleaf fills 80% of its envelope |
-| Root radius / crown radius | 2.16 | 2.59 | within the 1–3x field range |
-| Attractors consumed | 18.2% | 61.2% | broadleaf under-claims its envelope |
-| Attractor density realised vs profile | 2.76 vs 2.50 /m³ | 5.55 vs 5.00 /m³ | within 11% |
-| **Dead shoot segments** | **33.1%** | **78.4%** | broadleaf plausible; **conifer is wrong** |
+### The dominant limitation: the skeleton is far too sparse in fine twigs
 
-**KNOWN DEFECT: conifer self-shading mortality is too high.** 78.4% of conifer
-shoot segments die of self-shading, against a believed-correct figure under 40%.
-The cause is measured and understood: the conifer's narrow conical envelope
-combined with an annual whorl of laterals gives it about nine times the
-broadleaf's shoot density per unit crown volume (15.4 vs 1.77 segments/m³), and
-the crowding — not the mortality threshold — is the driver. Reducing the branch
-order from 4 to 3 and the whorl success rate from 0.90 to 0.62 brought it down
-from 88.7%, but no further progress is defensible without being able to LOOK at
-the crown. Blind numeric tuning was therefore stopped rather than continued.
+This has now been measured **four independent ways**, and it is the single issue
+that limits realism more than anything else:
 
-A regression gate in `test_tree_growth.c` locks the value just above the measured
-78.4% so it cannot silently worsen, and is labelled in the source as recording a
-defect rather than endorsing one.
+| Measurement | Broadleaf, 80 yr | What a real tree shows |
+|---|---|---|
+| Living terminal shoots | 557 | order of 10⁵ |
+| Total leaf area | 8 m² | several hundred m² |
+| Attractors consumed | 18% of the cloud | most of it |
+| Crown radius vs its own envelope | 7.7 m of 9.6 m | fills it |
 
-**Related, lower severity:** the broadleaf claims only 18.2% of its attractor
-cloud and reaches 80% of its envelope radius. Crown filling density and
-self-shading mortality are directly coupled — raising the branch-break
-probability improves filling and worsens mortality — so both need to be
-calibrated together against visual reference.
+The four are the same fact seen from different angles. Foliage is borne on living
+terminal shoots, so 557 tips can only carry a few square metres of leaf however
+generously each shoot is counted.
 
-**What unblocks these:** the headless validation rasteriser. Until generated
-geometry can be inspected as an image, these two quantities cannot be judged, and
-the project directive is explicit that visual quality must be assessed visually.
-This is the next engineering step.
+The consequence propagates: the pipe model calibrates branch radii against
+supported foliage area, so 100× too little foliage makes branches roughly 6×
+too thin (100^(1/2.49)), and branches that thin cannot carry the wood mass hanging
+from them. That is why the deflection pass reports **216 of 16 952 segments
+hitting the rotation clamp** on a mature tree, and why a 250-year tree deflects
+21 m. The mechanics is behaving correctly for the input it is given; the input is
+wrong.
 
-## 4. Tooling gaps in the development sandbox
+Raising `max_branch_order` from 5 to 8 (and enlarging the per-order arrays from 6
+to 10 slots, which was the binding constraint) improved the 250-year case from 259
+to 1 786 terminal shoots but barely moved the 80-year case. So the array size was
+*a* limit, not *the* limit — the remaining constraint is the rate at which the
+growth simulation creates and keeps higher-order shoots, which is governed by the
+bud-break probability, the crown envelope stop, and shade mortality. Those three
+are directly coupled: raising branching improves density and worsens mortality.
+
+`tree_mechanics_run` now emits a runtime warning whenever more than 1% of segments
+hit the rotation clamp, naming the likely cause, so this surfaces on every run
+instead of being hidden. The test suite prints it too.
+
+### Other measurements
+
+| Quantity | Broadleaf 80 yr | Conifer 80 yr |
+|---|---|---|
+| Shoot segments | ~14 000 | ~27 000 |
+| Realised height | 16.7 m (target 18.8 m) | 27.5 m (target 27.3 m) |
+| Trunk base radius | 0.260 m (0.168 m before flare, ×1.55) | 0.341 m (×1.40) |
+| Wood mass | 1 957 kg | 2 444 kg |
+| Root radius / crown radius | 2.16 | 2.59 |
+| Dead shoot segments | 33.1% | 78.4% |
+| Own-bend sign violations | 0 | 0 |
+
+**KNOWN DEFECT: conifer self-shading mortality.** 78.4% of conifer shoot segments
+die, against a believed-correct figure under 40%. The cause is measured: the
+conifer carries about nine times the broadleaf's shoot density per unit crown
+volume, so crowding drives it, not the mortality threshold. A regression gate in
+`test_tree_growth.c` locks the value just above the measurement so it cannot
+worsen silently, and is labelled in the source as recording a defect rather than
+endorsing one.
+
+### Why tuning stopped here
+
+Crown density, self-shading mortality and branch radii form one coupled system.
+Every remaining lever trades one against another, and the project directive is
+explicit that visual quality must be judged visually. Continuing to tune blind
+would be optimising numbers with no way to tell whether the tree looks right.
+**The headless validation rasteriser is the unblocking step.**
+
+## 4. Tooling gaps in the development sandbox## 4. Tooling gaps in the development sandbox
 
 | Gap | Effect | Mitigation |
 |---|---|---|

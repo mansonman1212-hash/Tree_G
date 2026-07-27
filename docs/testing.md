@@ -74,6 +74,16 @@ tests/test_tree_growth.c  attractor cloud placement and calibration, full-tree
                     an isotropic control, branch orders not scaled copies,
                     sibling inequality from the resource partition, age
                     progression, cancellation, organ-budget reservation
+tests/test_tree_mechanics.c  radius assignment and both radius invariants,
+                    basal flare presence and decay, the pipe relation verified
+                    directly against r = k*A^(1/delta), exponent sensitivity,
+                    mass against an independent bounding-cylinder estimate,
+                    evergreen vs deciduous foliage load, winter fallback taper,
+                    deflection against an unbent baseline, the own-bend sign
+                    audit, joint connectivity after bending, frame orthonormality
+                    after bending, stiffness and retention sensitivity, reaction
+                    wood correlated with load, determinism, non-no-op check, age
+                    scaling, independent root sizing and taper
 tests/test_camera.c FOV clamping, basis orthonormality, pitch clamp with no
                     gimbal flip, orbit leaves pivot untouched, framing from any
                     angle and aspect, visibility-predicate anti-vacuity,
@@ -127,6 +137,12 @@ otherwise be likely to ship.
 | isotropic-light control case | crown asymmetry that appears without a cause |
 | root/crown radius ratio | root spread scaled from height, giving a 12:1 plate on the conifer |
 | conifer mortality gate | a recorded known defect silently getting worse |
+| own-bend sign audit inside the pass | a deflection sign error hidden by rigid propagation, which legitimately lifts back-pointing branches |
+| deflection vs an unbent baseline | comparing a bent segment against its parent, which gravitropism already makes point more upward |
+| pipe relation tested directly, not at "branch points" | a test that found zero checkable cases because laterals hang off buds, and so asserted nothing |
+| frame orthonormality after bending | stale rotation-minimising frames shearing every cross-section |
+| joint connectivity after bending | rotating a segment without re-anchoring its children, opening a crack at every joint |
+| physiological age without assuming the leader is youngest | a correct tree failing because its leader stopped extending decades ago |
 | reverse-Z near→1 / far→0 and monotonicity | depth silently rebuilt as conventional Z, or sign error making everything fail the depth test |
 | "reverse-Z concentrates precision near the camera" | a refactor that keeps the endpoints correct but loses the precision distribution |
 | vertical-FOV assertion against `tan(fov/2)` | accidental fisheye or a factor-of-two error in the FOV |
@@ -160,10 +176,14 @@ Run on the development host (Linux x86-64), both available compilers:
 
 | Configuration | Result |
 |---|---|
-| clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | 348 cases, 513 279 checks, 0 failures |
-| clang 15.0.7, release (`-O2 -DNDEBUG`) | 348 cases, 513 279 checks, 0 failures |
-| gcc 11.5.0, debug | 348 cases, 513 279 checks, 0 failures |
-| gcc 11.5.0, release | 348 cases, 513 279 checks, 0 failures |
+| clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | 384 cases, 532 366 checks, 0 failures |
+| clang 15.0.7, release (`-O2 -DNDEBUG`) | 384 cases, 532 366 checks, 0 failures |
+| gcc 11.5.0, debug | 384 cases, 532 366 checks, 0 failures |
+| gcc 11.5.0, release | 384 cases, 532 366 checks, 0 failures |
+
+The run intentionally prints a WARN from `tree_mechanics` about segments hitting
+the rotation clamp. That is the known sparse-skeleton limitation surfacing itself
+on every run rather than being hidden; see `limitations.md`.
 
 All four runs produce **byte-identical output**.
 

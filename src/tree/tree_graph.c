@@ -542,11 +542,23 @@ TgResult tree_graph_validate(const TreeGraph *g, f32 connection_tolerance,
                     record(report, GRAPH_ISSUE_ORDER_NOT_MONOTONE, i);
                 }
                 /* Radius invariant: a child may not be thicker than its parent
-                 * unless a deformity is explicitly recorded. */
-                if (is_seg && organ_type_is_segment((OrganType)p->type) &&
-                    o->radius_base > 0.0f && p->radius_tip > 0.0f &&
+                 * unless a deformity is explicitly recorded.
+                 *
+                 * A lateral axis's first segment hangs off a BUD, not directly
+                 * off the host segment, so the woody parent has to be found by
+                 * stepping through the intervening organ. Checking only direct
+                 * segment parents skipped every branch union -- precisely the
+                 * places where a child thicker than its parent would be most
+                 * visible. */
+                const Organ *woody = p;
+                if (!organ_type_is_segment((OrganType)woody->type) &&
+                    woody->parent != TG_INVALID_ID && woody->parent < n) {
+                    woody = tree_graph_organ(g, woody->parent);
+                }
+                if (is_seg && organ_type_is_segment((OrganType)woody->type) &&
+                    o->radius_base > 0.0f && woody->radius_base > 0.0f &&
                     (o->flags & (ORGAN_FLAG_DAMAGED | ORGAN_FLAG_BROKEN)) == 0) {
-                    if (o->radius_base > p->radius_base * 1.02f) {
+                    if (o->radius_base > woody->radius_base * 1.02f) {
                         record(report, GRAPH_ISSUE_CHILD_THICKER_THAN_PARENT, i);
                     }
                 }

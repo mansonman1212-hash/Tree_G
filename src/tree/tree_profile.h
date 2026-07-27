@@ -221,12 +221,20 @@ typedef struct TreeProfile {
 
     /* Branching. Values are per branch ORDER where an array is given; index 0 is
      * the trunk. */
+    /* Per-order arrays are sized for TEN orders, not six.
+     *
+     * A real mature broadleaf carries eight or more branch orders and on the order
+     * of 100,000 living twig tips. With six slots the deepest achievable order was
+     * five, which produced 534 living tips and therefore about 4 m^2 of leaf area
+     * on a tree that should carry hundreds -- measured three independent ways
+     * (leaf area, attractor consumption, and crown radius against its envelope).
+     * The array size was the binding constraint, so it is part of the fix. */
     u32 max_branch_order;
-    f32 branch_angle_deg[6];       /* insertion angle from the parent axis   */
+    f32 branch_angle_deg[10];      /* insertion angle from the parent axis   */
     f32 branch_angle_spread_deg;   /* +/- variation                          */
-    f32 internode_length_m[6];
+    f32 internode_length_m[10];
     f32 internode_length_spread;   /* fractional                             */
-    f32 order_length_ratio[6];     /* child axis length / parent remaining   */
+    f32 order_length_ratio[10];    /* child axis length / parent remaining   */
     u32 flushes_per_year;
 
     /* Apical control: the share of a node's resource kept by the apical bud.
@@ -236,8 +244,8 @@ typedef struct TreeProfile {
     f32 apical_control_min;
 
     /* Tropisms. Bounded per-step angular budgets in radians. */
-    f32 gravitropism[6];           /* toward the axis set-point              */
-    f32 plagiotropic_set_angle_deg[6]; /* 0 = vertical, 90 = horizontal      */
+    f32 gravitropism[10];          /* toward the axis set-point              */
+    f32 plagiotropic_set_angle_deg[10]; /* 0 = vertical, 90 = horizontal     */
     f32 phototropism;
     f32 max_turn_per_step;
 

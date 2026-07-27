@@ -16,5 +16,6 @@ void test_suite_camera(void);
 void test_suite_tree_profile(void);
 void test_suite_tree_graph(void);
 void test_suite_tree_growth(void);
+void test_suite_tree_mechanics(void);
 
 #endif /* TG_TEST_SUITES_H */

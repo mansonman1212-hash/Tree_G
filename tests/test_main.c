@@ -114,6 +114,7 @@ int main(int argc, char **argv) {
         { "tree/profile",    test_suite_tree_profile },
         { "tree/graph",      test_suite_tree_graph },
         { "tree/growth",     test_suite_tree_growth },
+        { "tree/mechanics",  test_suite_tree_mechanics },
     };
     const char *filter = NULL;
     size_t i;

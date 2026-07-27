@@ -214,16 +214,18 @@ static const TreeProfile g_broadleaf[] = {
         0.52f,                          /* crown_widest_at: rounded crown    */
         0.28f,                          /* crown_base_height_ratio           */
 
-        5,                              /* max_branch_order                  */
-        { 0.0f, 48.0f, 55.0f, 62.0f, 68.0f, 72.0f },
+        8,                              /* max_branch_order                  */
+        { 0.0f, 48.0f, 55.0f, 62.0f, 68.0f, 72.0f, 74.0f, 76.0f, 78.0f, 80.0f },
         14.0f,                          /* branch_angle_spread_deg           */
         /* Order 0 IS the juvenile annual height increment: the growth model
          * decays it as exp(-t/k), so summing the leader's internodes over the
          * whole history reproduces mature_height exactly. Enforced by
          * tree_profile_validate. */
-        { 0.43f, 0.34f, 0.20f, 0.12f, 0.070f, 0.045f },
+        { 0.43f, 0.34f, 0.20f, 0.12f, 0.070f, 0.045f,
+          0.032f, 0.024f, 0.018f, 0.014f },
         0.30f,                          /* internode_length_spread           */
-        { 1.0f, 0.62f, 0.55f, 0.48f, 0.40f, 0.32f },
+        { 1.0f, 0.62f, 0.55f, 0.48f, 0.40f, 0.32f,
+          0.28f, 0.24f, 0.20f, 0.18f },
         1,                              /* flushes_per_year                  */
 
         0.62f,                          /* apical_control                    */
@@ -232,10 +234,11 @@ static const TreeProfile g_broadleaf[] = {
 
         /* Gravitropism: strong on the trunk, weak on high-order twigs, which is
          * what lets fine shoots wander while the trunk stays upright. */
-        { 0.85f, 0.30f, 0.20f, 0.14f, 0.10f, 0.08f },
+        { 0.85f, 0.30f, 0.20f, 0.14f, 0.10f, 0.08f,
+          0.070f, 0.060f, 0.050f, 0.040f },
         /* Set angles: the trunk is vertical, primaries ascend, higher orders sit
          * progressively closer to horizontal. */
-        { 0.0f, 42.0f, 55.0f, 66.0f, 74.0f, 80.0f },
+        { 0.0f, 42.0f, 55.0f, 66.0f, 74.0f, 80.0f, 83.0f, 85.0f, 87.0f, 88.0f },
         0.45f,                          /* phototropism                      */
         0.42f,                          /* max_turn_per_step (rad)           */
 
@@ -323,18 +326,22 @@ static const TreeProfile g_conifer[] = {
         3,
         { 0.0f, 82.0f, 74.0f, 70.0f, 68.0f, 66.0f },
         9.0f,                           /* tighter: whorls are regular        */
-        { 0.71f, 0.30f, 0.17f, 0.090f, 0.055f, 0.040f },
+        { 0.71f, 0.30f, 0.17f, 0.090f, 0.055f, 0.040f,
+          0.030f, 0.022f, 0.016f, 0.012f },
         0.18f,
-        { 1.0f, 0.50f, 0.46f, 0.40f, 0.34f, 0.30f },
+        { 1.0f, 0.50f, 0.46f, 0.40f, 0.34f, 0.30f,
+          0.26f, 0.22f, 0.20f, 0.18f },
         1,
 
         0.86f,                          /* strong, persistent apical control  */
         0.0004f,                        /* barely decays: stays excurrent     */
         0.78f,
 
-        { 0.95f, 0.16f, 0.12f, 0.10f, 0.08f, 0.07f },
+        { 0.95f, 0.16f, 0.12f, 0.10f, 0.08f, 0.07f,
+          0.060f, 0.050f, 0.040f, 0.030f },
         /* Near-horizontal tiers, with the outer orders drooping slightly. */
-        { 0.0f, 86.0f, 92.0f, 96.0f, 98.0f, 100.0f },
+        { 0.0f, 86.0f, 92.0f, 96.0f, 98.0f, 100.0f,
+          101.0f, 102.0f, 103.0f, 104.0f },
         0.22f,                          /* less phototropic than broadleaf    */
         0.30f,
 
@@ -379,7 +386,12 @@ static const TreeProfile g_conifer[] = {
         0.10f,                          /* weak taproot in the mature form    */
         0.0f,
 
-        0.0f, 0.0f, 0.0f, 0.0f,         /* broadleaf leaf fields unused       */
+        0.0f, 0.0f, 0.0f,               /* broadleaf blade fields unused      */
+        /* Needles per metre of shoot. Needed by the mechanics pass: an evergreen
+         * retains five needle age classes, so its supported foliage mass -- and
+         * therefore its branch sag -- is far greater than a deciduous tree's for
+         * the same skeleton. */
+        900.0f,                         /* leaves_per_metre_of_shoot         */
         0.024f,                         /* needle_length_m                   */
         0.0016f                         /* needle_width_m                    */
     }
@@ -697,20 +709,25 @@ typedef struct QualityBudget {
 static QualityBudget quality_budget(TreeQuality q) {
     QualityBudget b;
     switch (q) {
+    /* Organ ceilings are sized against what a real skeleton needs. A mature
+     * broadleaf with eight branch orders carries on the order of 100,000 living
+     * twig tips, and every tip needs its internodes and buds, so a reference tree
+     * legitimately runs into the millions of organs. Earlier ceilings were set
+     * before that was measured and were themselves limiting the tree's density. */
     case QUALITY_DRAFT:
         b.seg_min = 8;  b.seg_max = 20;  b.max_leaves = 2000;
-        b.leaf_tris = 40;   b.bark_feature_m = 0.060f; b.max_organs = 40000; break;
+        b.leaf_tris = 40;   b.bark_feature_m = 0.060f; b.max_organs = 60000; break;
     case QUALITY_STANDARD:
         b.seg_min = 12; b.seg_max = 40;  b.max_leaves = 20000;
-        b.leaf_tris = 140;  b.bark_feature_m = 0.024f; b.max_organs = 200000; break;
+        b.leaf_tris = 140;  b.bark_feature_m = 0.024f; b.max_organs = 500000; break;
     case QUALITY_HIGH:
         b.seg_min = 18; b.seg_max = 72;  b.max_leaves = 70000;
-        b.leaf_tris = 340;  b.bark_feature_m = 0.011f; b.max_organs = 600000; break;
+        b.leaf_tris = 340;  b.bark_feature_m = 0.011f; b.max_organs = 1600000; break;
     case QUALITY_REFERENCE:
     case TREE_QUALITY_COUNT:
     default:
         b.seg_min = 24; b.seg_max = 128; b.max_leaves = 220000;
-        b.leaf_tris = 780;  b.bark_feature_m = 0.005f; b.max_organs = 1500000; break;
+        b.leaf_tris = 780;  b.bark_feature_m = 0.005f; b.max_organs = 4000000; break;
     }
     return b;
 }

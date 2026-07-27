@@ -66,6 +66,7 @@ TREE_SOURCES=(
     "src/tree/tree_profile.c"
     "src/tree/tree_graph.c"
     "src/tree/tree_growth.c"
+    "src/tree/tree_mechanics.c"
 )
 
 TEST_SOURCES=(
@@ -80,6 +81,7 @@ TEST_SOURCES=(
     "tests/test_tree_profile.c"
     "tests/test_tree_graph.c"
     "tests/test_tree_growth.c"
+    "tests/test_tree_mechanics.c"
 )
 
 # -------------------------------------------------------------------------

@@ -134,8 +134,14 @@ typedef struct Organ {
     f32 length;
     f32 radius_base;
     f32 radius_tip;
-    f32 curvature;      /* signed, about frame_ref: recorded bend             */
+    f32 curvature;      /* signed bend applied by the mechanics pass, radians */
     f32 torsion;        /* deliberate twist applied on top of the RMF         */
+    /* Reaction-wood eccentricity as a fraction of the radius, 0 to <0.5. The
+     * SIDE it applies to is not stored: it follows from the profile's reaction
+     * wood type (upper in angiosperms, lower in gymnosperms) and the segment's
+     * own direction relative to gravity, so storing it would be a second source
+     * of truth that could disagree. */
+    f32 eccentricity;
     f32 vigor;          /* resource received this step                        */
     f32 light;          /* accumulated light exposure, 0..1                   */
     f32 supported_leaf_area;  /* m^2 distal to and including this organ       */
@@ -153,9 +159,15 @@ typedef struct Organ {
      * organ type is a defect waiting to happen. */
     f32 attach_along;   /* 0..1 along the parent internode                    */
     f32 attach_angle;   /* phyllotactic angle in the PARENT's frame, radians  */
+
+    u32 _pad[3];
 } Organ;
 
-TG_STATIC_ASSERT(sizeof(Organ) == 128, "Organ must be exactly 128 bytes");
+/* 144 bytes rather than a tighter 132: the struct is kept 16-byte aligned, and
+ * the explicit padding is a deliberate place for the next per-organ quantity
+ * (bark maturity, wound depth) so adding one does not silently change the size
+ * and invalidate every recorded fingerprint without notice. */
+TG_STATIC_ASSERT(sizeof(Organ) == 144, "Organ must be exactly 144 bytes");
 
 typedef struct Axis {
     u32 id;
