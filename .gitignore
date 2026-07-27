@@ -1,0 +1,36 @@
+# Build outputs -------------------------------------------------------------
+build/
+build-host/
+out/
+*.obj
+*.o
+*.a
+*.lib
+*.exe
+*.pdb
+*.ilk
+*.exp
+*.idb
+*.dll
+*.log
+
+# Generated validation artifacts (regenerate with tools/refgen) --------------
+artifacts/
+*.ppm
+*.png.tmp
+
+# Editor / OS ---------------------------------------------------------------
+.vs/
+.vscode/
+.zed/
+.idea/
+*.swp
+*~
+Thumbs.db
+.DS_Store
+
+# Never commit these --------------------------------------------------------
+*.key
+*.pem
+.env
+.env.*
