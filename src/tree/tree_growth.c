@@ -1611,6 +1611,35 @@ done:
 /* supported above-ground structure rather than by light and space competition.  */
 /* ------------------------------------------------------------------------- */
 
+/* Birth step for a root organ.
+ *
+ * WHY ROOTS NEED THIS AT ALL. The root system is generated in one pass after the
+ * shoots, because its scale is derived from the realised crown. That is the right
+ * dependency, but it left every root organ stamped with step 0 -- and once the mesh
+ * began carrying a per-vertex birth step for the construction replay, the
+ * consequence became visible in the record itself: a twelve-year tree reported 141
+ * organs already in existence at year 0, which is the whole root plate appearing
+ * fully formed beneath a seedling.
+ *
+ * A root's extension is coupled to the shoot system's: a tree that has grown a
+ * quarter of its height has grown roughly a quarter of its root spread, because both
+ * are driven by the same carbon. So a root organ's birth step is its fractional
+ * position along its own root axis, mapped onto the tree's history. It is an
+ * inference from the shoot growth curve rather than a simulated root growth model,
+ * and it is labelled as one -- but it is a far better answer than "all of it, in the
+ * first year". */
+static u16 root_birth_step(const TreeResolved *r, f32 fraction_along, u32 order) {
+    f32 total = (f32)tg_max_u32(r->growth_steps, 1u);
+    /* Higher-order roots branch off wood that already exists, so they cannot
+     * predate it; the order offset keeps a fine rootlet from claiming to be older
+     * than the major root it hangs from. */
+    f32 t = tg_saturatef(fraction_along) + 0.06f * (f32)order;
+    f32 step = tg_saturatef(t) * total;
+    if (step > total - 1.0f) { step = total - 1.0f; }
+    if (step < 0.0f) { step = 0.0f; }
+    return (u16)step;
+}
+
 TgResult tree_growth_roots(TreeGraph *graph, const TreeResolved *r,
                            GrowthCancel *cancel, GrowthResult *out_result) {
     const TreeProfile *p;
@@ -1733,9 +1762,9 @@ TgResult tree_growth_roots(TreeGraph *graph, const TreeResolved *r,
 
                 {
                     f32 len = seg_len * tg_rng_range(&rd, 0.8f, 1.2f);
-                    res = tree_graph_add_segment(graph, axis_id,
-                                                 ORGAN_ROOT_SEGMENT, pos, cur,
-                                                 len, 0, &seg);
+                    res = tree_graph_add_segment(
+                        graph, axis_id, ORGAN_ROOT_SEGMENT, pos, cur, len,
+                        root_birth_step(r, (f32)(k + 1u) / (f32)count, 0u), &seg);
                     if (res == TG_ERR_LIMIT_EXCEEDED) {
                         if (out_result != NULL) {
                             out_result->hit_organ_limit = true;
@@ -1787,10 +1816,12 @@ TgResult tree_growth_roots(TreeGraph *graph, const TreeResolved *r,
                                     cd = v3_norm_or(v3(cd.x, -tg_absf(cd.y) - 0.05f,
                                                        cd.z), cd);
                                 }
-                                res = tree_graph_add_segment(graph, child,
-                                                             ORGAN_ROOT_SEGMENT,
-                                                             cpos, cd, clen, 0,
-                                                             &seg);
+                                res = tree_graph_add_segment(
+                                    graph, child, ORGAN_ROOT_SEGMENT, cpos, cd,
+                                    clen,
+                                    root_birth_step(r, (f32)(k + 1u) / (f32)count,
+                                                    1u),
+                                    &seg);
                                 if (res == TG_ERR_LIMIT_EXCEEDED) {
                                     if (out_result != NULL) {
                                         out_result->hit_organ_limit = true;
@@ -1831,8 +1862,9 @@ TgResult tree_growth_roots(TreeGraph *graph, const TreeResolved *r,
             if (cur.y > -0.4f) {
                 cur = v3_norm_or(v3(cur.x, -0.6f, cur.z), v3(0, -1, 0));
             }
-            res = tree_graph_add_segment(graph, axis_id, ORGAN_ROOT_SEGMENT, pos,
-                                         cur, seg_len, 0, &seg);
+            res = tree_graph_add_segment(
+                graph, axis_id, ORGAN_ROOT_SEGMENT, pos, cur, seg_len,
+                root_birth_step(r, (f32)(k + 1u) / (f32)count, 0u), &seg);
             if (res == TG_ERR_LIMIT_EXCEEDED) {
                 if (out_result != NULL) { out_result->hit_organ_limit = true; }
                 return TG_OK;

@@ -31,10 +31,13 @@ SOURCES=(
     "src/core/rng.c"
     "src/geom/mesh.c" "src/geom/mesh_validate.c" "src/geom/spatial.c"
     "src/geom/camera.c"
+    "src/geom/mesh_bvh.c"
     "src/tree/tree_profile.c" "src/tree/tree_graph.c" "src/tree/tree_growth.c"
     "src/tree/tree_mechanics.c" "src/tree/tree_skin.c"
     "src/tree/tree_foliage.c"
     "src/tree/tree_bark.c"
+    "src/tree/tree_build.c"
+    "src/tree/tree_inspect.c"
     "tools/img_png.c" "tools/swrast.c" "tools/refgen.c"
 )
 

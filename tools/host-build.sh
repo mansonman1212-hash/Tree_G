@@ -61,6 +61,7 @@ GEOM_SOURCES=(
     "src/geom/mesh_validate.c"
     "src/geom/spatial.c"
     "src/geom/camera.c"
+    "src/geom/mesh_bvh.c"
 )
 TREE_SOURCES=(
     "src/tree/tree_profile.c"
@@ -70,6 +71,8 @@ TREE_SOURCES=(
     "src/tree/tree_skin.c"
     "src/tree/tree_foliage.c"
     "src/tree/tree_bark.c"
+    "src/tree/tree_build.c"
+    "src/tree/tree_inspect.c"
 )
 
 TEST_SOURCES=(
@@ -87,6 +90,7 @@ TEST_SOURCES=(
     "tests/test_tree_mechanics.c"
     "tests/test_tree_foliage.c"
     "tests/test_tree_bark.c"
+    "tests/test_tree_build.c"
 )
 
 # -------------------------------------------------------------------------

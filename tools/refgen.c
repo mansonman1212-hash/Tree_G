@@ -17,6 +17,8 @@
 #include "../src/tree/tree_skin.h"
 #include "../src/tree/tree_foliage.h"
 #include "../src/tree/tree_bark.h"
+#include "../src/tree/tree_build.h"
+#include "../src/tree/tree_inspect.h"
 
 #include "img_png.h"
 #include "swrast.h"
@@ -24,64 +26,32 @@
 #include <stdio.h>
 #include <string.h>
 
-typedef struct Built {
-    TreeSettings     settings;
-    TreeResolved     resolved;
-    TreeGraph        graph;
-    GrowthResult     growth;
-    MechanicsResult  mechanics;
-    SkinResult       skin;
-    FoliageResult    foliage;
-    Mesh             mesh;
-    MeshValidateReport validation;
-    bool             valid;
-} Built;
+/* The reference generator used to hand-wire resolve, grow, roots, mechanics, skin,
+ * foliage, finalise and validate in that order. That sequence now lives in exactly
+ * one place -- tree_build -- because a second copy is a second chance to get the
+ * order wrong, and getting it wrong is silent: skinning before the mechanics pass
+ * produces a complete, watertight mesh of an unbent tree with no radii. */
+typedef Tree Built;
 
 static TgResult build_tree(Built *b, TreeCategory cat, f32 age, TreeQuality q,
-                           u64 seed, TreeSeason season) {
-    TgResult r;
-
-    memset(b, 0, sizeof *b);
-    b->settings = tree_settings_default(cat);
-    b->settings.age_years = age;
-    b->settings.quality = q;
-    b->settings.seed = seed;
-    b->settings.season = season;
-
-    r = tree_profile_resolve(&b->settings, &b->resolved);
-    if (r != TG_OK) { return r; }
-    r = tree_graph_init(&b->graph, 8192, b->resolved.max_organs);
-    if (r != TG_OK) { return r; }
-    r = tree_growth_run(&b->graph, &b->resolved, NULL, &b->growth);
-    if (r != TG_OK) { return r; }
-    r = tree_growth_roots(&b->graph, &b->resolved, NULL, &b->growth);
-    if (r != TG_OK) { return r; }
-    r = tree_mechanics_run(&b->graph, &b->resolved, &b->mechanics);
-    if (r != TG_OK) { return r; }
-
-    r = mesh_init(&b->mesh, 1u << 16, 1u << 17);
-    if (r != TG_OK) { return r; }
-    r = tree_skin_build(&b->mesh, &b->graph, &b->resolved, &b->skin);
-    if (r != TG_OK) { return r; }
-    r = tree_foliage_build(&b->mesh, &b->graph, &b->resolved,
-                           (u16)b->resolved.growth_steps, &b->foliage);
-    if (r != TG_OK) { return r; }
-    r = mesh_finalize(&b->mesh);
-    if (r != TG_OK) { return r; }
-
-    /* Validation is not optional and its result is not assumed. */
-    {
-        MeshValidateOptions opt = mesh_validate_default_options();
-        opt.max_scratch_bytes = (u64)2048 * 1024 * 1024;
-        b->valid = (mesh_validate(&b->mesh, &opt, &b->validation) == TG_OK);
-    }
-    return TG_OK;
+                          u64 seed, TreeSeason season) {
+    TreeSettings s = tree_settings_default(cat);
+    TreeBuildOptions opt = tree_build_default_options();
+    s.age_years = age;
+    s.quality = q;
+    s.seed = seed;
+    s.season = season;
+    /* Generous, because this tool exists to validate: a mature tree's topology
+     * needs more scratch than an interactive session would allocate, and a report
+     * that says NOT VALIDATED because the tool was frugal is worthless. */
+    opt.validate_scratch_bytes = (u64)2048 * 1024 * 1024;
+    return tree_build(&s, &opt, b);
 }
 
 static void destroy_tree(Built *b) {
-    mesh_destroy(&b->mesh);
-    tree_graph_destroy(&b->graph);
+    tree_free(b);
 }
+
 
 static Aabb section_bounds_or_all(const Mesh *m, bool roots_only, bool crown_only,
                                   const TreeGraph *g, f32 crown_base) {
@@ -262,7 +232,7 @@ static void report(const Built *b, const char *label) {
            b->validation.topology_not_checked
                ? "NOT VALIDATED (too large for the topology scratch buffers; "
                  "the counts below were never measured)"
-               : (b->valid ? "VALID" : "INVALID"),
+               : (b->mesh_valid ? "VALID" : "INVALID"),
            b->validation.closed_components[MESH_SECTION_WOOD],
            (unsigned long long)b->validation.boundary_edges[MESH_SECTION_WOOD],
            b->validation.enclosed_volume[MESH_SECTION_WOOD]);
@@ -283,7 +253,55 @@ static void report(const Built *b, const char *label) {
            (double)b->foliage.target_leaf_area_m2);
     printf("  interim    %u unions are interpenetrating tubes (junction meshing "
            "not yet implemented)\n", b->skin.interpenetrating_unions);
-    if (!b->valid) { mesh_validate_log_report(&b->validation); }
+    if (!b->mesh_valid && b->mesh_validated) {
+        mesh_validate_log_report(&b->validation);
+    }
+    {
+        MeshBvhStats bs;
+        InspectResult ins;
+        Ray ray;
+        Aabb wb = mesh_section_bounds(&b->mesh, MESH_SECTION_WOOD);
+        mesh_bvh_stats(&b->bvh, &bs);
+        printf("  index      %u nodes over %u wood triangles, depth %u, "
+               "%.1f tris per leaf, %.1f MiB, %u regrowths\n",
+               bs.nodes, b->bvh.tri_count, bs.max_depth,
+               (double)bs.mean_leaf_triangles,
+               (double)bs.bytes / (1024.0 * 1024.0), bs.grow_events);
+        /* A worked inspection, so the query path is exercised on every reference
+         * tree rather than only in the tests, and so the report shows what a user
+         * would actually be told. */
+        ray.origin = v3(aabb_center(wb).x + 40.0f, 1.6f, aabb_center(wb).z);
+        ray.dir = v3(-1.0f, 0.0f, 0.0f);
+        ray.t_min = 0.0f;
+        ray.t_max = 200.0f;
+        if (tree_inspect_ray(b, ray, &ins)) {
+            char desc[1024];
+            (void)tree_inspect_describe(b, &ins, desc, sizeof desc);
+            printf("  inspect    a ray at breast height reports:\n");
+            {
+                const char *p2 = desc;
+                while (*p2 != '\0') {
+                    const char *nl = p2;
+                    while (*nl != '\0' && *nl != '\n') { nl++; }
+                    printf("               %.*s\n", (int)(nl - p2), p2);
+                    p2 = (*nl == '\0') ? nl : nl + 1;
+                }
+            }
+        }
+    }
+    {
+        const TreeConstructionStage *first = tree_stage_at(b, 0);
+        const TreeConstructionStage *mid =
+            tree_stage_at(b, b->growth.steps_run / 2u);
+        const TreeConstructionStage *last = tree_stage_at(b, b->growth.steps_run);
+        if (first != NULL && mid != NULL && last != NULL) {
+            printf("  replay     year 0: %u organs %.2f m | year %u: %u organs "
+                   "%.2f m | year %u: %u organs %.2f m\n",
+                   first->organs, (double)first->height_m,
+                   (unsigned)mid->step, mid->organs, (double)mid->height_m,
+                   (unsigned)last->step, last->organs, (double)last->height_m);
+        }
+    }
     printf("  wood volume check: %.4f m3 implies %.0f kg at %.0f kg/m3\n",
            b->validation.enclosed_volume[MESH_SECTION_WOOD],
            b->validation.enclosed_volume[MESH_SECTION_WOOD]
@@ -395,7 +413,11 @@ int main(int argc, char **argv) {
                 continue;
             }
             report(&b, cases[ci].label);
-            if (!b.valid) { failures++; }
+            /* A mesh that could not be validated is not counted as a failure of
+             * the geometry -- it is a failure of the validator's scratch budget, and
+             * conflating the two would make the tool report a defect that has not
+             * been established. */
+            if (b.mesh_validated && !b.mesh_valid) { failures++; }
 
             (void)snprintf(prefix, sizeof prefix, "%s/%s", out_dir,
                            cases[ci].prefix);

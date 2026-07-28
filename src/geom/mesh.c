@@ -626,6 +626,14 @@ TgFingerprint mesh_fingerprint(const Mesh *m) {
         tg_fp_add_u32(&f, v[i].organ_id);
         tg_fp_add_u32(&f, v[i].attrib);
         tg_fp_add_f32(&f, v[i].ao);
+        /* The birth step belongs in the fingerprint because it is part of what the
+         * geometry IS, not decoration: it is the whole basis of the construction
+         * replay, and a change to when a vertex comes into existence changes what
+         * the viewer is shown. Leaving it out made a change to root birth steps --
+         * which moved a twelve-year tree's entire root plate from year 0 to a
+         * plausible progression -- produce a bit-identical fingerprint, so the
+         * regression gate would have declared nothing had changed. */
+        tg_fp_add_u32(&f, v[i].birth_step);
     }
 
     ind = mesh_indices(m);

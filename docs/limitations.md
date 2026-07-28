@@ -28,20 +28,22 @@ As of the current commit, the following exist as design decisions in
 `docs/research.md` and `docs/architecture.md` and as nothing else:
 
 - Geometry layer: junction meshing (branch unions are still interpenetrating
-  tubes), BVH.
-- Tree layer: dormant buds and bud scales, leaf veins and midrib relief, damage,
-  build orchestration, construction stage records (the per-vertex birth step they
-  need now exists; nothing consumes it).
+  tubes).
+- Tree layer: dormant buds and bud scales, leaf veins and midrib relief, damage.
 - Render layer: Win32 platform, D3D12 device, raster PBR renderer, progressive
   renderer, lighting, picking.
-- App layer: UI, construction replay controls, inspection panels.
+- App layer: UI, construction replay controls, inspection panels. The engine side of
+  both now exists -- a per-step construction record and a ray-to-organ inspection
+  query -- so what is missing is the interface, not the data.
 - HLSL shaders.
 - `build-and-run.cmd`.
 
 Now implemented, having been on this list: surface skinning (`tree_skin`), leaves
 and needles as real geometry (`tree_foliage`), bark relief as real geometry
-(`tree_bark`), the headless reference generator (`tools/refgen.c`) and the
-validation-capture rasteriser (`tools/swrast.c`).
+(`tree_bark`), build orchestration and the construction stage record (`tree_build`),
+the mesh BVH (`mesh_bvh`), geometry inspection (`tree_inspect`), the headless
+reference generator (`tools/refgen.c`) and the validation-capture rasteriser
+(`tools/swrast.c`).
 
 ## 3. Implemented and verified
 
@@ -230,6 +232,85 @@ history by regenerating the tree at each step would cost eighty full generations
 worse, it would not be provably the same tree at each stage. Nothing consumes this
 yet -- the replay is a renderer and UI feature and neither exists.
 
+### Build orchestration, spatial index and inspection
+
+Three things landed together because they are the engine-side of two of the
+directive's four pillars, and neither pillar had anything at all.
+
+**One entry point.** `tree_build` runs resolve, grow shoots, grow roots, mechanics,
+skin, foliage, finalise, validate, index and construction record, in that order, with
+progress reporting and cancellation, and returns everything in one struct with one
+free function. The order was previously hand-wired by every caller, and getting it
+wrong is SILENT: skinning before the mechanics pass produces a complete, watertight,
+validated mesh of an unbent tree with no radii, and nothing downstream complains.
+The reference generator now uses it, so there is one copy rather than two. Tests
+assert the properties the order exists to guarantee rather than the order itself.
+
+**A static BVH** over the finalised mesh, giving pick queries in log time. Measured
+on the 80-year broadleaf: 4.19 million nodes over 9.88 million wood triangles, depth
+21, 4.7 triangles per leaf, 215 MiB, and a pick that tests 54 triangles out of ten
+million. Every one of 240 randomly aimed rays in the test suite is checked against
+an exhaustive scan of every triangle -- not against a recorded expectation, which
+would only prove the code still does what it did.
+
+Three things were got wrong here and are worth recording:
+
+- **The node bound was wrong and a young tree failed to build.** A median split only
+  occurs above the leaf target, so a node of five triangles splits into two and three
+  and both become leaves; leaves hold as few as half a target and the node count can
+  approach the triangle count. The array now grows, and every access is by index
+  rather than by cached pointer precisely so a growth mid-build is safe.
+- **The index was sized from the whole mesh, not from the sections it covers.** A
+  wood-only index over a tree whose foliage is two thirds of its triangles allocated
+  400 MB where 230 was used. The section mask exists so the index is smaller than the
+  mesh; the allocation has to honour it.
+- **A leaf of four cost 448 MiB.** Eight halves the node count for roughly twice the
+  triangle tests per query -- 54 rising to about 100 out of ten million, which is not
+  a cost worth 230 MB.
+
+**Inspection.** `tree_inspect_ray` turns a ray into the full biological record of
+what it hit: organ, order, axis and axis kind, the year it was formed, cambial age,
+length and radii, the leaf area and wood mass it carries, its path length back to the
+base and how many organs deep it is -- plus the cost of the query itself, so a slow
+pick is measurable rather than suspected. `tree_inspect_describe` formats it. Every
+reported fact is checked against the graph it came from in the test suite, over
+whatever subset of 120 rays happens to hit.
+
+This is what makes a wrong tree diagnosable. "The crown is too sparse" is an opinion;
+"this is order 7, formed in year 74, 1.9 mm thick, carrying 0.004 m2 of leaf" is a
+measurement. Every reference capture now prints one worked inspection.
+
+**The construction record**, derived from the finished graph rather than captured
+during simulation, so a replay narrates the tree that is actually on screen. It
+immediately found a real defect: a twelve-year tree reported 141 organs already in
+existence at year 0, because the root system is generated in one pass after the
+shoots and every root organ was stamped with step 0 -- the whole root plate appearing
+fully formed beneath a seedling. Root birth steps are now inferred from fractional
+position along the root axis, which is an inference from the shoot growth curve rather
+than a simulated root growth model and is labelled as one. The same tree now reports
+3 organs at year 0, 135 at year 6 and 392 at year 12.
+
+That defect also exposed a gap in the fingerprint: it did not fold in the per-vertex
+birth step, so moving an entire root plate from year 0 to a plausible progression
+produced a bit-identical fingerprint and the regression gate would have reported that
+nothing had changed. It is folded in now.
+
+### Determinism, measured across compilers
+
+Four builds -- clang and gcc, `-O0 -DTG_DEBUG=1` and `-O2 -DNDEBUG` -- produce
+BYTE-IDENTICAL tree fingerprints, organ counts, axis counts, vertex counts, triangle
+counts and BVH shapes on four different trees. The probe is
+`build-host/diag/fp.c`.
+
+One caveat found while establishing this, and it is about the tests rather than the
+engine: clang and gcc disagreed on whether three of 120 grazing rays hit a triangle,
+which is ordinary floating-point rounding in the intersection test. That is not a
+generation difference -- no ray casting happens during generation -- but with the
+assertions inside the ray loop it changed the number of CHECKS the suite ran, from
+697,685 to 697,718, and that count is one of the signals used to notice unintended
+behaviour change. The ray tests now accumulate and assert once, so the suite's own
+shape does not depend on rounding.
+
 ### Remaining defects, stated plainly
 
 1. **Conifer self-shading mortality is zero.** Not merely low: no conifer shoot
@@ -283,7 +364,18 @@ yet -- the replay is a renderer and UI feature and neither exists.
    4.4 GB, which is beyond what a single tree can be given.
 11. **The conifer mesh now exceeds the topology scratch limit too**, for the same
    reason the 220-year broadleaf does, and is reported as NOT VALIDATED.
-12. **Leaf veins and midrib relief do not exist.** The blade is a smooth shell. The
+12. **The BVH is a median split, not a surface-area heuristic.** Adequate for
+   geometry as uniformly distributed as a tree's surface, and the cost achieved is
+   reported rather than assumed, but a proper SAH build would give shallower trees
+   and fewer triangle tests.
+13. **Root growth is inferred, not simulated.** Root birth steps come from position
+   along the root axis mapped onto the shoot growth curve. Real roots respond to
+   soil, water and obstruction on their own schedule.
+14. **Region inspection samples rather than enumerates.** `tree_inspect_region`
+   examines up to 4096 triangles and counts distinct organs with a one-element memo
+   that relies on triangles arriving grouped by organ. Both are stated in the source
+   and the truncation is reported to the caller.
+15. **Leaf veins and midrib relief do not exist.** The blade is a smooth shell. The
    relief belongs in a leaf-detail pass that displaces this surface at high
    quality; an earlier attempt to carry a midrib in the blade's TOPOLOGY produced
    906 boundary edges and 1 057 non-manifold edges, which is the wrong place for
