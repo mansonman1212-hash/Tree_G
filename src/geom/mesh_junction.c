@@ -199,13 +199,27 @@ static bool is_clip_face(const JunctionSpec *s, V3 centroid) {
     return clip_ball(s, centroid) > field_smooth(s, centroid);
 }
 
+/* Surface normal, from the SMOOTH UNION only -- never from the clipped field.
+ *
+ * The clip ball is a construction device: it decides where the patch ends and hands
+ * the limb over to the caller's tube. It is not part of the surface. Taking the
+ * gradient of max(smooth, clip) means that at the patch's boundary, where the clip
+ * term is the active one, the "normal" comes out as the SPHERE's radial direction --
+ * which points along the limb axis, nearly perpendicular to the actual surface.
+ *
+ * Nothing about the topology notices this. The mesh is watertight, manifold,
+ * consistently wound and correct in volume either way, and the first version passed
+ * every one of those checks. What it looked like was a dark sawtooth band around every
+ * seam, alternating between the patch's wrong normals and the ring's correct radial
+ * ones. It took a rendered capture to see it, which is why gate 8 of docs/testing.md
+ * exists. */
 static V3 field_gradient(const JunctionSpec *s, V3 p, f32 h) {
-    f32 dx = mesh_junction_field(s, v3(p.x + h, p.y, p.z))
-           - mesh_junction_field(s, v3(p.x - h, p.y, p.z));
-    f32 dy = mesh_junction_field(s, v3(p.x, p.y + h, p.z))
-           - mesh_junction_field(s, v3(p.x, p.y - h, p.z));
-    f32 dz = mesh_junction_field(s, v3(p.x, p.y, p.z + h))
-           - mesh_junction_field(s, v3(p.x, p.y, p.z - h));
+    f32 dx = field_smooth(s, v3(p.x + h, p.y, p.z))
+           - field_smooth(s, v3(p.x - h, p.y, p.z));
+    f32 dy = field_smooth(s, v3(p.x, p.y + h, p.z))
+           - field_smooth(s, v3(p.x, p.y - h, p.z));
+    f32 dz = field_smooth(s, v3(p.x, p.y, p.z + h))
+           - field_smooth(s, v3(p.x, p.y, p.z - h));
     return v3_norm_or(v3(dx, dy, dz), v3(0.0f, 1.0f, 0.0f));
 }
 

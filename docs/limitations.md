@@ -198,8 +198,9 @@ combinations of radius ratio, insertion angle and valence in the suite -- plus a
 independent estimates, and geometry is byte-identical across clang and gcc in debug and
 release.
 
-**Seven defects, and every one is now a test.** Six of the seven were caught by the mesh
-validator rather than by reading the code, which is the argument for gating on it:
+**Eight defects, and every one is now a test.** Six were caught by the mesh validator
+and one by a rendered capture -- only one was found by reading the code, which is the
+argument for gating on both:
 
 1. A **zero-width seam**. With the patch cut exactly at the ring plane, the two loops
    being sewn lay on the same circle in the same plane, so every seam triangle was a
@@ -232,6 +233,16 @@ validator rather than by reading the code, which is the argument for gating on i
    is visited twice and its diagonal is emitted twice -- one edge used by four triangles,
    on a union with no duplicate vertices and no pinch anywhere. Advance is now
    proportional to the two vertex counts, in integer arithmetic.
+8. **Surface normals taken from the CLIPPED field.** The clip ball decides where the
+   patch ends; it is not part of the surface. At the patch boundary, where the clip term
+   is active, the gradient came out as the sphere's radial direction -- along the limb
+   axis, roughly perpendicular to the actual surface. Every topological check passed:
+   watertight, manifold, consistently wound, correct volume. What it LOOKED like was a
+   dark sawtooth band around every seam. This one was found by rendering the union and
+   looking at it, and by nothing else. The normal now comes from the smooth union alone,
+   and a test asserts that boundary normals are close to perpendicular to their limb
+   axis -- verified non-vacuous by reintroducing the defect, which fails it with 146 of
+   1404 normals axial and a worst case of 0.991.
 
 **Two preconditions, computed rather than assumed.** Both are exposed as functions the
 caller must consult, and the module refuses rather than cracking when they are unmet:
@@ -249,6 +260,14 @@ the welding: nearby children have to be grouped into a single multi-limb junctio
 the cluster's limb length and clip radius derived from the group. Until that exists,
 generated trees still report `interpenetrating_unions` and the claim "the tree is one
 solid" is **not** made.
+
+**Visually reviewed, not only validated.** `build-host/diag/junc.c` renders a union with
+the CPU rasteriser. The single-child union shows a continuous surface with a genuine
+collar fillet and no trace of the three seams; the six-child whorl reads as a real
+conifer node, one solid with six laterals emerging through smooth collars. Those captures
+are what gate 8 of `docs/testing.md` requires, and they are what found defect 8 above.
+The captures live in `artifacts/junction_*.png`; once the integration exists, `refgen`
+will cover this ground as part of a whole tree and the standalone instrument can go.
 
 Cost, measured: a single union at grid 32 with eight limbs is about 12,200 patch
 triangles and 600 seam triangles. That is affordable only for unions coarse enough to be

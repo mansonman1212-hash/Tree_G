@@ -177,6 +177,7 @@ otherwise be likely to ship.
 | enclosed volume between limb tubes alone and limbs plus junction ball | a winding error, a lost limb, or a doubled patch, none of which changes the triangle count |
 | the collar measured as a fillet in the field, not asserted | a collar added as decoration rather than produced by the smooth union, which is what research.md requires |
 | inseparable union emits NOTHING | a ring left unreachable: a hole the size of a branch, reported as success |
+| boundary normals perpendicular to their limb axis | normals taken from the clipped field rather than the smooth union, which is invisible to every topological check and renders as a dark sawtooth band around every seam; found by a capture, and the test was verified by reintroducing the defect |
 | junction patch carries an organ id and a birth step | junction geometry that cannot be inspected, or that appears at step zero and shows a fully formed fork under a seedling |
 
 ## 5. Rules
@@ -194,8 +195,8 @@ Run on the development host (Linux x86-64), both available compilers:
 
 | Configuration | Result |
 |---|---|
-| clang 15.0.7, release (`-O2 -DNDEBUG`) | 447 cases, 710 662 checks, 0 failures |
-| gcc 11.5.0, release | 447 cases, 710 662 checks, 0 failures |
+| clang 15.0.7, release (`-O2 -DNDEBUG`) | 448 cases, 711 007 checks, 0 failures |
+| gcc 11.5.0, release | 448 cases, 711 007 checks, 0 failures |
 | clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | every suite run individually, 0 failures |
 | gcc 11.5.0, debug | compiles clean; `geom/junction`, `geom/mesh`, `tree/build`, `tree/bark`, `tree/foliage` run, 0 failures |
 
@@ -227,6 +228,11 @@ Warnings: zero, with `-Werror -Wall -Wextra -Wshadow -Wconversion
 -Wcast-align -Wwrite-strings -Wundef -Wvla -Wswitch-enum`.
 
 Leak gate: 0 bytes live at exit, with per-suite attribution.
+
+**Gate 8, visual.** A welded union was rendered and reviewed rather than accepted on the
+strength of its validation report, and that review found a defect no topological check
+could see: see defect 8 in `limitations.md`. Captures are produced by
+`build-host/diag/junc.c` into `artifacts/junction_*.png`.
 
 **Not verified here:** the `asan` mode is authored and compiles, but the
 AddressSanitizer and UndefinedBehaviorSanitizer runtime libraries are not installed in

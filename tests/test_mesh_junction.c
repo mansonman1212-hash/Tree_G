@@ -529,6 +529,68 @@ static void test_patch_carries_its_attribution(void) {
     fixture_free(&f);
 }
 
+static void test_seam_normals_lie_in_the_surface(void) {
+    Fixture f;
+    MeshValidateReport rep;
+    const MeshVertex *v;
+    u64 k;
+    u32 checked = 0, axial = 0;
+    f32 worst = 0.0f;
+
+    TG_T_CASE("normals at the patch boundary lie IN the surface, not along the limb");
+    /* This test exists because of a rendered capture, and it is the clearest example
+     * in the project of why gate 8 of docs/testing.md is not optional.
+     *
+     * The first version took the surface normal from the gradient of the CLIPPED
+     * field. The clip ball is a construction device that decides where the patch ends;
+     * it is not part of the surface. So at the patch's boundary, where the clip term is
+     * the active one, the gradient came out as the sphere's radial direction -- which
+     * points along the limb axis, roughly perpendicular to the actual surface.
+     *
+     * Every topological check passed. The mesh was watertight, manifold, consistently
+     * wound and correct in volume. What it LOOKED like was a dark sawtooth band around
+     * every seam. Nothing but a picture, or this test, would have found it.
+     *
+     * The assertion is derived from geometry rather than from the implementation: near
+     * the clip radius the surface is a tube wall, so its normal must be close to
+     * perpendicular to that tube's axis. */
+    (void)fixture_build(&f, 3u, 32u, 16u, 0.55f, 0.95f, 0.34f, true);
+    TG_EXPECT_OK(mesh_junction_build(&f.mesh, &f.spec, &f.result));
+    fixture_finish(&f, &rep);
+    expect_welded(&f, &rep, "seam normal fixture");
+
+    v = mesh_vertices(&f.mesh);
+    for (k = 0; k < mesh_vertex_count(&f.mesh); ++k) {
+        V3 rel;
+        f32 dist, best = -2.0f;
+        u32 li, near_limb = 0;
+        if (v[k].organ_id != f.spec.organ_id) { continue; }   /* patch only     */
+        rel = v3_sub(v[k].position, f.spec.centre);
+        dist = v3_len(rel);
+        /* Only the outer part of the patch, where the surface is a tube wall rather
+         * than the fillet in the fork. */
+        if (dist < f.spec.limb_length * 0.72f) { continue; }
+        for (li = 0; li < f.spec.limb_count; ++li) {
+            f32 d = v3_dot(v3_norm_or(rel, v3(0.0f, 1.0f, 0.0f)), f.limb[li].dir);
+            if (d > best) { best = d; near_limb = li; }
+        }
+        {
+            f32 along = tg_absf(v3_dot(v[k].normal, f.limb[near_limb].dir));
+            checked++;
+            if (along > worst) { worst = along; }
+            if (along > 0.80f) { axial++; }
+        }
+    }
+    TG_EXPECT_MSG(checked > 50u,
+                  "only %u patch vertices lay near the boundary, so this proved "
+                  "little", checked);
+    TG_EXPECT_MSG(axial == 0u,
+                  "%u of %u boundary normals point along their limb axis rather than "
+                  "out of the surface (worst |n.axis| = %.3f): the seam will render "
+                  "as a dark band", axial, checked, (double)worst);
+    fixture_free(&f);
+}
+
 static void test_geometry_sweep(void) {
     static const f32 ratios[] = { 0.20f, 0.45f, 0.70f };
     static const f32 elevs[] = { 0.9f, 1.3f, 1.9f };
@@ -589,5 +651,6 @@ void test_suite_mesh_junction(void) {
     test_volume_against_an_independent_estimate();
     test_determinism();
     test_patch_carries_its_attribution();
+    test_seam_normals_lie_in_the_surface();
     test_geometry_sweep();
 }
