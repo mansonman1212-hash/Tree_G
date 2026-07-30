@@ -32,6 +32,7 @@ SOURCES=(
     "src/geom/mesh.c" "src/geom/mesh_validate.c" "src/geom/spatial.c"
     "src/geom/camera.c"
     "src/geom/mesh_bvh.c"
+    "src/geom/mesh_junction.c"
     "src/tree/tree_profile.c" "src/tree/tree_graph.c" "src/tree/tree_growth.c"
     "src/tree/tree_mechanics.c" "src/tree/tree_skin.c"
     "src/tree/tree_foliage.c"

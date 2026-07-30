@@ -52,6 +52,16 @@ tests/test_mesh.c   vertex/attrib packing, section discipline, closed-solid
                     inversion among many components, numeric corruption,
                     scale-relative area threshold, fingerprint behaviour,
                     limits, empty mesh
+tests/test_mesh_junction.c  the risk register's mandated six-child adversarial
+                    fixture, every valence from one to six children, ring
+                    resolutions from 6 to 64 segments, a grid deliberately too
+                    coarse, a shallow-angle union refused and then welded once
+                    given the length it asked for, seven classes of malformed
+                    spec, field sign structure and the measurable existence of
+                    the collar fillet, enclosed volume between two independent
+                    bounds, byte-identical determinism, organ and birth-step
+                    attribution of the patch, and a 45-configuration sweep of
+                    radius ratio, insertion angle and valence
 tests/test_spatial.c grid queries checked against a brute-force reference,
                     ascending-order guarantee, bounded-output determinism,
                     cell-size invariance, removal without rebuild, degenerate
@@ -160,6 +170,14 @@ otherwise be likely to ship.
 | one-ulp mutation detection | a fingerprint too weak to detect a real geometry change |
 | failed array growth preserves contents | losing a valid tree on an allocation failure |
 | leak gate across all suites | ownership defects |
+| six-child union welds to ONE closed component | the risk register's R1: cracks or non-manifold edges at high valence, which is where a junction scheme that works on a simple bifurcation falls apart |
+| seam triangle count equals the sum of the two loop lengths | a stitch that closes approximately; the count IS the watertightness argument, because it means every edge of both loops is consumed exactly once |
+| seam diagonal reuse counted explicitly | a merge advanced by angle, which lets one side saturate, wrap to its first vertex and revisit its starting pair -- one edge used by four triangles on a union with no duplicate vertices and no pinch anywhere |
+| boundary loop simplicity checked before anything is committed | a boundary walk keyed by vertex, which cannot represent a surface that pinches to a point; the pinch cannot be repaired by duplicating the vertex because the validator welds by exact position, so it must be avoided and retried |
+| enclosed volume between limb tubes alone and limbs plus junction ball | a winding error, a lost limb, or a doubled patch, none of which changes the triangle count |
+| the collar measured as a fillet in the field, not asserted | a collar added as decoration rather than produced by the smooth union, which is what research.md requires |
+| inseparable union emits NOTHING | a ring left unreachable: a hole the size of a branch, reported as success |
+| junction patch carries an organ id and a birth step | junction geometry that cannot be inspected, or that appears at step zero and shows a fully formed fork under a seedling |
 
 ## 5. Rules
 
@@ -176,24 +194,40 @@ Run on the development host (Linux x86-64), both available compilers:
 
 | Configuration | Result |
 |---|---|
-| clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | 384 cases, 532 366 checks, 0 failures |
-| clang 15.0.7, release (`-O2 -DNDEBUG`) | 384 cases, 532 366 checks, 0 failures |
-| gcc 11.5.0, debug | 384 cases, 532 366 checks, 0 failures |
-| gcc 11.5.0, release | 384 cases, 532 366 checks, 0 failures |
+| clang 15.0.7, release (`-O2 -DNDEBUG`) | 447 cases, 710 662 checks, 0 failures |
+| gcc 11.5.0, release | 447 cases, 710 662 checks, 0 failures |
+| clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | every suite run individually, 0 failures |
+| gcc 11.5.0, debug | compiles clean; `geom/junction`, `geom/mesh`, `tree/build`, `tree/bark`, `tree/foliage` run, 0 failures |
 
-The run intentionally prints a WARN from `tree_mechanics` about segments hitting
-the rotation clamp. That is the known sparse-skeleton limitation surfacing itself
-on every run rather than being hidden; see `limitations.md`.
+The two release runs produce **byte-identical output**, including identical per-suite
+check counts.
 
-All four runs produce **byte-identical output**.
+The debug configurations are recorded as suite-by-suite rather than as one run, and the
+reason is stated rather than glossed: `tree/mechanics` alone takes about eleven minutes
+at `-O0`, which exceeds the single-command time limit available in this development
+sandbox. Every suite was run and every suite passed; the aggregate line was not produced
+in one process. gcc debug was exercised on the suites touching the code changed in this
+checkpoint plus the mesh and geometry suites, not on all fourteen.
+
+**Determinism, measured across compilers and configurations.** Four builds -- clang and
+gcc, `-O0 -DTG_DEBUG=1` and `-O2 -DNDEBUG` -- produce byte-identical tree fingerprints,
+organ, axis, vertex and triangle counts and BVH shapes over four different trees. The
+probe is `build-host/diag/fp.c`. Fingerprints changed at this checkpoint because the
+per-vertex birth step is now folded into `mesh_fingerprint`; that was a deliberate
+correction, since a change to when geometry comes into existence must register as a
+change to the geometry.
+
+The run intentionally prints WARNs from `tree_mechanics` about segments hitting the
+rotation clamp, from `tree_skin` about hard-edge corners and interpenetrating unions, and
+from `tree_foliage` about the foliage budget. Those are known limitations surfacing
+themselves on every run rather than being hidden; see `limitations.md`.
 
 Warnings: zero, with `-Werror -Wall -Wextra -Wshadow -Wconversion
 -Wdouble-promotion -Wstrict-prototypes -Wmissing-prototypes -Wpointer-arith
 -Wcast-align -Wwrite-strings -Wundef -Wvla -Wswitch-enum`.
 
-Peak CPU memory during the suite: 11.5 MB. Leak gate: 0 bytes live at exit, plus per-suite leak attribution so a leak names the suite that caused it.
+Leak gate: 0 bytes live at exit, with per-suite attribution.
 
 **Not verified here:** the `asan` mode is authored and compiles, but the
-AddressSanitizer and UndefinedBehaviorSanitizer runtime libraries are not
-installed in the development sandbox, so it cannot be executed. See
-`limitations.md`.
+AddressSanitizer and UndefinedBehaviorSanitizer runtime libraries are not installed in
+the development sandbox, so it cannot be executed. See `limitations.md`.

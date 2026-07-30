@@ -116,7 +116,7 @@ regenerated in this path — that is asserted by hash comparison in debug builds
 
 | # | Risk | Severity | Mitigation | Status |
 |---|---|---|---|---|
-| R1 | Junction meshing produces cracks or non-manifold edges at high-valence unions | High | Ring-correspondence stitching + `mesh_validate` edge-manifold test gates finalisation; adversarial fixture with 6-child union | Open, gated |
+| R1 | Junction meshing produces cracks or non-manifold edges at high-valence unions | High | Ring-correspondence stitching + `mesh_validate` edge-manifold test gates finalisation; adversarial fixture with 6-child union | **Mitigated at module level; fixture passing. Not yet integrated into `tree_skin`** |
 | R2 | Bark subdivision explodes triangle count beyond memory | High | Per-organ adaptive budget from screen-independent world-space feature size; hard cap with honest failure | Open, gated |
 | R3 | Determinism lost through parallel stages | High | Per-item ID-keyed RNG substreams; determinism test runs both serial and parallel | Open, gated |
 | R4 | Leaf count × leaf triangles makes mature broadleaf infeasible at reference quality | High | Measure first; profile-driven leaf triangle budget; report honestly rather than silently thinning foliage | Open |
@@ -125,6 +125,46 @@ regenerated in this path — that is asserted by hash comparison in debug builds
 | R7 | Mechanics solve produces unstable or exploding deflection at extreme age | Medium | Bounded per-segment rotation, curvature clamp, NaN guard, stress test at max age | Open, gated |
 | R8 | Watertightness incompatible with peeling bark shells | Medium | Peeling shells are a separate, explicitly non-manifold mesh section tagged `MESH_SECTION_BARK_FLAKE`; the woody section alone is required watertight | Resolved by design |
 | R9 | Host-verified float results differ from MSVC results, masking a real bug | Medium | Host tests assert invariants and tolerances, not magic constants; hashes are compared within a run, not across platforms | Resolved by design |
+
+## 9a. R1 in detail, because it was the hardest thing in the geometry
+
+`mesh_junction` implements the construction `docs/research.md` section 3 fixes: a
+smooth-union field over the participating tapered cones, a manifold patch extracted
+from it, and ring-correspondence stitching to the limb cross-sections. The mandated
+adversarial fixture -- a six-child union, eight limbs meeting at a point -- is
+`test_six_child_whorl`, and it asserts what the mitigation promised: one closed
+component, zero boundary edges, positive enclosed volume, and the validator's
+edge-manifold test passing.
+
+One design choice was made here rather than in the research document, and it was made
+against R1 itself. **Marching tetrahedra, not marching cubes.** R1's named failure mode
+is non-manifold edges at high valence; marching cubes has ambiguous face and interior
+cases whose mishandling is the textbook cause of precisely that, and handling them
+correctly requires a 256-entry table long enough to mistype silently. A tetrahedral
+decomposition has no ambiguous case and no table, and because every extracted vertex
+lies on a grid EDGE and is shared by every tetrahedron using that edge, each interior
+edge of the output is used by exactly two triangles by construction rather than by
+argument. Kuhn's decomposition is used so that neighbouring cells agree on the diagonal
+of a shared face, which is what makes the patch watertight across cells.
+
+Two PRECONDITIONS emerged from measurement and are now part of the module's contract,
+exposed as functions the caller must consult:
+
+- `mesh_junction_min_limb_length` -- limbs that have not yet parted company at the
+  clip radius have no separate exit to sew to. A child leaving at a shallow angle is
+  genuinely fused to its parent for a long way. The module refuses such a union and
+  reports `not_separable` rather than emitting a ring nothing reaches.
+- `mesh_junction_min_grid` -- a union meshed on a grid coarser than its thinnest limb
+  produces stray components. The module raises the grid to what it needs.
+
+**What remains for integration.** `tree_skin` does not call this yet, and the reason is
+specific: the junction region of a typical union extends about 2.3 parent radii, while
+successive nodes on a branch are about 1.5 radii apart, so junction regions on a real
+tree OVERLAP. Two overlapping unions cannot be welded independently. The module already
+accepts up to twelve limbs at one union, so the integration is a clustering problem --
+group nearby children into a single multi-limb junction -- not a limitation of the
+welding. That clustering is the next piece of work and is recorded in
+`docs/limitations.md`.
 
 ## 10. Directory layout
 

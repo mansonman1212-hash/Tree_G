@@ -27,8 +27,9 @@ Consequences, stated plainly:
 As of the current commit, the following exist as design decisions in
 `docs/research.md` and `docs/architecture.md` and as nothing else:
 
-- Geometry layer: junction meshing (branch unions are still interpenetrating
-  tubes).
+- Geometry layer: nothing. `mesh_junction` completes the layer as a module; what is
+  outstanding is its INTEGRATION into `tree_skin`, so the trees the generator produces
+  still carry interpenetrating tubes at their unions. See section 3b.
 - Tree layer: dormant buds and bud scales, leaf veins and midrib relief, damage.
 - Render layer: Win32 platform, D3D12 device, raster PBR renderer, progressive
   renderer, lighting, picking.
@@ -49,8 +50,8 @@ reference generator (`tools/refgen.c`) and the validation-capture rasteriser
 
 **Layer 0 (core)** — `core_types.h`, `log`, `mem`, `math3d`, `hash`, `rng`.
 
-**Layer 1 (geom), partial** — `mesh`, `mesh_validate`, `spatial`, `camera`.
-Still missing from this layer: `mesh_junction` and `bvh`.
+**Layer 1 (geom), complete** — `mesh`, `mesh_validate`, `spatial`, `camera`,
+`mesh_bvh`, `mesh_junction`.
 
 **Layer 2 (tree), partial** — `tree_profile`, `tree_graph`, `tree_growth`
 (shoot and root systems), `tree_mechanics` (foliage area, pipe-model radii,
@@ -176,6 +177,83 @@ renders pale grey-brown instead of dark green. For an evergreen the twigs are
 completely hidden in reality, which points at the fix -- an evergreen should spend
 far less of its budget on wood and far more on needles, because its wood is
 occluded. That rebalancing is not done.
+
+### 3b. Welded branch unions: the module is proven, the integration is not
+
+`docs/research.md` section 3 calls junction geometry "the single most important realism
+decision" and rejects two alternatives by name: boolean CSG, and pushing one cylinder
+through another. The second is exactly what the generator has been doing -- 82,437
+interpenetrating tubes on an 80-year broadleaf -- and it is what `mesh_junction` exists
+to replace.
+
+**What is proven.** The module takes the limbs meeting at a union, each with its
+already-emitted boundary ring, and returns a single welded manifold: a smooth-union
+field over tapered cones, a patch extracted by marching tetrahedra, and
+ring-correspondence stitching to the rings. Risk R1's mandated adversarial fixture, a
+six-child union of eight limbs, produces **one closed component, zero boundary edges,
+positive enclosed volume, and passes the validator's edge-manifold test**. So does every
+valence from one to six children, every ring resolution from 6 to 64 segments, and 45
+combinations of radius ratio, insertion angle and valence in the suite -- plus a
+270-configuration sweep run outside it. Enclosed volume is bounded above and below by
+independent estimates, and geometry is byte-identical across clang and gcc in debug and
+release.
+
+**Seven defects, and every one is now a test.** Six of the seven were caught by the mesh
+validator rather than by reading the code, which is the argument for gating on it:
+
+1. A **zero-width seam**. With the patch cut exactly at the ring plane, the two loops
+   being sewn lay on the same circle in the same plane, so every seam triangle was a
+   sliver with an undefined normal: 62 inconsistent windings and 20 boundary edges. The
+   patch is now cut short of the ring by a seam band with real width.
+2. **Per-triangle winding from the field gradient.** Adjacent triangles share a diagonal
+   and must traverse it in opposite directions; an independent per-triangle test cannot
+   guarantee that. Winding is now derived from which side of the surface is inside,
+   which is exact, local and automatically consistent between neighbouring tetrahedra.
+3. **A seam that sorted the loop by angle.** That silently discarded the loop's
+   connectivity, so the patch's own boundary edges went unpaired wherever the two orders
+   disagreed: 26 boundary edges on one union. The loop is now used exactly as it was
+   walked.
+4. **Plane-plane corners in the clip region.** Clipping with one half-space per limb
+   manufactured edges belonging to no limb's exit where two planes met: nine boundary
+   loops for seven limbs, two of them unsewn. Clipping with a ball has no corners.
+5. **A ragged cap-classification band.** Dropping triangles within a fraction of a cell
+   of the clip surface is right for some orientations and wrong for others; ragged
+   dropping left isolated holes and twelve loops on a three-limb union. Classification is
+   now by which field term is active, which is a partition and cannot be ragged.
+6. **A boundary walk keyed by vertex.** That assumes the boundary is a union of simple
+   cycles, which fails where the surface pinches to a point. The walk now follows the
+   triangle fan, which disambiguates correctly at a pinch. A pinch cannot be repaired by
+   duplicating the vertex, because the validator welds by exact position and would weld
+   it straight back; so a pinch that survives is detected and the extraction is retried
+   with a nudged clip radius, deliberately at fractions incommensurate with the cell
+   size.
+7. **A merge advanced by angle.** If all of one loop's angles happen to precede the
+   other's, that side saturates, its index wraps to its first vertex, the starting pair
+   is visited twice and its diagonal is emitted twice -- one edge used by four triangles,
+   on a union with no duplicate vertices and no pinch anywhere. Advance is now
+   proportional to the two vertex counts, in integer arithmetic.
+
+**Two preconditions, computed rather than assumed.** Both are exposed as functions the
+caller must consult, and the module refuses rather than cracking when they are unmet:
+`mesh_junction_min_limb_length`, because limbs that have not parted company at the clip
+radius have no separate exit to sew to -- a child leaving at 0.2 rad is genuinely fused
+to its parent for 1.97 m; and `mesh_junction_min_grid`, because a union meshed coarser
+than its thinnest limb produces stray components.
+
+**What is NOT done, and the specific reason.** `tree_skin` does not call this yet. The
+junction region of a typical union extends about 2.3 parent radii, while successive
+nodes on a branch are about 1.5 radii apart, so on a real tree the junction regions
+OVERLAP -- and two overlapping unions cannot be welded independently. The module already
+accepts twelve limbs at one union, so this is a clustering problem, not a limitation of
+the welding: nearby children have to be grouped into a single multi-limb junction, and
+the cluster's limb length and clip radius derived from the group. Until that exists,
+generated trees still report `interpenetrating_unions` and the claim "the tree is one
+solid" is **not** made.
+
+Cost, measured: a single union at grid 32 with eight limbs is about 12,200 patch
+triangles and 600 seam triangles. That is affordable only for unions coarse enough to be
+worth welding, which is a further reason the integration needs a visibility threshold as
+well as a clustering pass.
 
 ### Bark: relief as geometry, and what it took to see it
 

@@ -62,6 +62,7 @@ GEOM_SOURCES=(
     "src/geom/spatial.c"
     "src/geom/camera.c"
     "src/geom/mesh_bvh.c"
+    "src/geom/mesh_junction.c"
 )
 TREE_SOURCES=(
     "src/tree/tree_profile.c"
@@ -82,6 +83,7 @@ TEST_SOURCES=(
     "tests/test_rng.c"
     "tests/test_hash.c"
     "tests/test_mesh.c"
+    "tests/test_mesh_junction.c"
     "tests/test_spatial.c"
     "tests/test_camera.c"
     "tests/test_tree_profile.c"

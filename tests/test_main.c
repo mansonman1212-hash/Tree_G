@@ -109,6 +109,7 @@ int main(int argc, char **argv) {
         { "core/rng",        test_suite_rng },
         { "core/hash",       test_suite_hash },
         { "geom/mesh",       test_suite_mesh },
+        { "geom/junction",   test_suite_mesh_junction },
         { "geom/spatial",    test_suite_spatial },
         { "geom/camera",     test_suite_camera },
         { "tree/profile",    test_suite_tree_profile },
