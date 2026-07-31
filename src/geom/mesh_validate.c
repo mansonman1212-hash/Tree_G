@@ -180,6 +180,42 @@ static void position_bits(V3 p, u32 out[3]) {
     memcpy(out, c, sizeof c);
 }
 
+/* LSD radix sort over PARALLEL arrays: a u64 key with a u32 payload.
+ *
+ * The struct-of-arrays form exists for one reason, and it is memory. A record of
+ * {u64 key, u32 payload} pads to 16 bytes, so sorting 20.5 million of them costs
+ * 656 MB with the scratch buffer. Split into two arrays it is 12 bytes of data and
+ * 12 of scratch -- 492 MB -- and on the largest tree in the project that difference
+ * decided whether its topology could be verified at all. */
+static void radix_sort_u64_u32(u64 *key, u32 *val, u64 *ktmp, u32 *vtmp, u64 n) {
+    u64 counts[256];
+    int pass;
+    u64 *ksrc = key, *kdst = ktmp;
+    u32 *vsrc = val, *vdst = vtmp;
+
+    for (pass = 0; pass < 8; ++pass) {
+        u64 i;
+        u64 sum = 0;
+        int shift = pass * 8;
+        memset(counts, 0, sizeof counts);
+        for (i = 0; i < n; ++i) { counts[(ksrc[i] >> shift) & 0xFFu]++; }
+        for (i = 0; i < 256; ++i) {
+            u64 c = counts[i];
+            counts[i] = sum;
+            sum += c;
+        }
+        for (i = 0; i < n; ++i) {
+            u64 slot = counts[(ksrc[i] >> shift) & 0xFFu]++;
+            kdst[slot] = ksrc[i];
+            vdst[slot] = vsrc[i];
+        }
+        { u64 *kt = ksrc; ksrc = kdst; kdst = kt; }
+        { u32 *vt = vsrc; vsrc = vdst; vdst = vt; }
+    }
+    /* Eight passes is even, so the sorted data is back in the caller's arrays. */
+    TG_CHECK(ksrc == key && vsrc == val);
+}
+
 static u64 position_hash(V3 p) {
     u32 b[3];
     u64 h = TG_FNV64_OFFSET;
@@ -272,6 +308,42 @@ static void uf_union(u32 *parent, u32 a, u32 b) {
 /* Per-section topology                                                      */
 /* ------------------------------------------------------------------------- */
 
+/* Peak scratch the topology check needs for a section, in bytes.
+ *
+ * PEAK, not total. The check runs four phases -- position welding, edge
+ * classification, duplicate-triangle detection, per-component volume -- and each
+ * releases its working set before the next allocates. Reporting and checking the sum
+ * was not a conservative simplification: it refused to verify the topology of the two
+ * largest trees in the project, which is precisely where a topological defect is most
+ * likely and least visible.
+ *
+ * The individual phase costs are stated so a caller's limit means something. */
+static u64 topology_scratch_peak(u64 tri_count, u64 vcount) {
+    /* Phase A, welding: a 16-byte record per vertex plus its sort scratch, plus the
+     * canonical map, which is retained for later phases. */
+    u64 a = vcount * (16u + 16u + 4u);
+    /* Phase B, edges: bucketed by their lower welded vertex, so each edge is 8 bytes
+     * -- a high vertex and a triangle id with the direction in its top bit -- with no
+     * sort scratch at all. Plus bucket starts and cursors, the union-find parent
+     * array, and the retained canonical map.
+     *
+     * The earlier form radix-sorted a 16-byte record per directed edge, which for a
+     * 20.5-million-triangle section is 61.5 million records and, with the scratch
+     * buffer a radix sort requires, 1.97 GB for this phase alone. Counting-sorting
+     * into buckets removes the scratch buffer and halves the record. */
+    u64 b = tri_count * 3u * 8u + vcount * (4u + 4u + 4u) + tri_count * 4u;
+    /* Phase C, duplicate triangles: a 64-bit key and a 32-bit id per triangle, in
+     * parallel arrays, with scratch. */
+    u64 c = tri_count * (8u + 4u + 8u + 4u) + tri_count * 4u;
+    /* Phase D, per-component volume, plus the retained parent array. */
+    u64 d = tri_count * (8u + sizeof(V3) + 1u) + tri_count * 4u;
+    u64 peak = a;
+    if (b > peak) { peak = b; }
+    if (c > peak) { peak = c; }
+    if (d > peak) { peak = d; }
+    return peak;
+}
+
 static TgResult validate_section_topology(const Mesh *m, MeshSection s,
                                           const MeshValidateOptions *opt,
                                           MeshValidateReport *r) {
@@ -281,63 +353,93 @@ static TgResult validate_section_topology(const Mesh *m, MeshSection s,
     const MeshVertex *verts = mesh_vertices(m);
     u64 tri_count = sp->triangle_count;
     u64 vcount = sp->vertex_count;
-    u64 edge_count;
-    u64 edge_bytes, tmp_bytes, parent_bytes, canon_bytes, total_scratch;
-    EdgeRec *edges = NULL;
-    EdgeRec *tmp = NULL;
-    u32 *parent = NULL;
+    u64 edge_slots, ne = 0;
+    u64 canon_bytes = 0, parent_bytes = 0;
     u32 *canon = NULL;
+    u32 *parent = NULL;
     u64 i;
     TgResult result = TG_OK;
 
     if (tri_count == 0) { return TG_OK; }
+    if (!tg_ckd_mul_u64(tri_count, 3, &edge_slots)) { return TG_ERR_OVERFLOW; }
 
-    if (!tg_ckd_mul_u64(tri_count, 3, &edge_count)) { return TG_ERR_OVERFLOW; }
-    /* The weld pass needs vcount records; the edge pass needs 3*tri_count. One
-     * pair of buffers sized for the larger of the two serves both. */
-    if (!tg_ckd_mul_u64(tg_max_u64(edge_count, vcount), sizeof(EdgeRec),
-                        &edge_bytes)) {
-        return TG_ERR_OVERFLOW;
-    }
-    tmp_bytes = edge_bytes;
-    if (!tg_ckd_mul_u64(tri_count, sizeof(u32), &parent_bytes)) {
-        return TG_ERR_OVERFLOW;
-    }
-    if (!tg_ckd_mul_u64(vcount, sizeof(u32), &canon_bytes)) {
-        return TG_ERR_OVERFLOW;
-    }
-    total_scratch = edge_bytes + tmp_bytes + parent_bytes + canon_bytes;
-    if (total_scratch > opt->max_scratch_bytes) {
-        record(r, MESH_ISSUE_SCRATCH_LIMIT, s, total_scratch);
-        r->topology_not_checked = true;
-        TG_LOG_ERRORF(MV_SUB,
-                      "section '%s': topology check needs %llu scratch bytes, "
-                      "limit is %llu; topology NOT verified",
-                      info->name,
-                      (unsigned long long)total_scratch,
-                      (unsigned long long)opt->max_scratch_bytes);
-        return TG_ERR_LIMIT_EXCEEDED;
+    {
+        u64 need = topology_scratch_peak(tri_count, vcount);
+        if (need > opt->max_scratch_bytes) {
+            record(r, MESH_ISSUE_SCRATCH_LIMIT, s, need);
+            r->topology_not_checked = true;
+            TG_LOG_ERRORF(MV_SUB,
+                          "section '%s': topology check needs %llu scratch bytes at "
+                          "its peak, limit is %llu; topology NOT verified",
+                          info->name, (unsigned long long)need,
+                          (unsigned long long)opt->max_scratch_bytes);
+            return TG_ERR_LIMIT_EXCEEDED;
+        }
     }
 
-    edges = (EdgeRec *)tg_alloc(edge_bytes);
-    tmp = (EdgeRec *)tg_alloc(tmp_bytes);
-    parent = (u32 *)tg_alloc(parent_bytes);
+    /* Retained across phases. */
+    if (!tg_ckd_mul_u64(vcount, sizeof(u32), &canon_bytes) ||
+        !tg_ckd_mul_u64(tri_count, sizeof(u32), &parent_bytes)) {
+        return TG_ERR_OVERFLOW;
+    }
     canon = (u32 *)tg_alloc(canon_bytes);
-    if (edges == NULL || tmp == NULL || parent == NULL || canon == NULL) {
+    parent = (u32 *)tg_alloc(parent_bytes);
+    if (canon == NULL || parent == NULL) {
         result = TG_ERR_OUT_OF_MEMORY;
         goto cleanup;
     }
-
     for (i = 0; i < tri_count; ++i) { parent[i] = (u32)i; }
 
-    build_weld_map(verts, sp->first_vertex, (u32)vcount, edges, tmp, canon);
-
-    /* Build directed edges on WELDED vertex identity, recording undirected
-     * identity plus direction. `ne` is the number actually written: an edge
-     * whose two endpoints weld to the same point is skipped, so the array is
-     * compacted rather than left with uninitialised holes. */
+    /* --- Phase A: position welding ---------------------------------------- */
     {
-        u64 ne = 0;
+        u64 rec_bytes;
+        EdgeRec *recs, *tmp;
+        if (!tg_ckd_mul_u64(vcount, sizeof(EdgeRec), &rec_bytes)) {
+            result = TG_ERR_OVERFLOW;
+            goto cleanup;
+        }
+        recs = (EdgeRec *)tg_alloc(rec_bytes);
+        tmp = (EdgeRec *)tg_alloc(rec_bytes);
+        if (recs == NULL || tmp == NULL) {
+            if (recs != NULL) { tg_free(recs, rec_bytes); }
+            if (tmp != NULL) { tg_free(tmp, rec_bytes); }
+            result = TG_ERR_OUT_OF_MEMORY;
+            goto cleanup;
+        }
+        build_weld_map(verts, sp->first_vertex, (u32)vcount, recs, tmp, canon);
+        tg_free(recs, rec_bytes);
+        tg_free(tmp, rec_bytes);
+    }
+
+    /* --- Phase B: edge classification ------------------------------------- */
+    {
+        u64 start_bytes, cur_bytes, high_bytes, tri_bytes;
+        u32 *starts = NULL, *cursor = NULL, *ehigh = NULL, *etri = NULL;
+
+        if (!tg_ckd_mul_u64(vcount + 1u, sizeof(u32), &start_bytes) ||
+            !tg_ckd_mul_u64(edge_slots, sizeof(u32), &high_bytes)) {
+            result = TG_ERR_OVERFLOW;
+            goto cleanup;
+        }
+        cur_bytes = start_bytes;
+        tri_bytes = high_bytes;
+        starts = (u32 *)tg_alloc_zero(start_bytes);
+        cursor = (u32 *)tg_alloc_zero(cur_bytes);
+        ehigh = (u32 *)tg_alloc(high_bytes);
+        etri = (u32 *)tg_alloc(tri_bytes);
+        if (starts == NULL || cursor == NULL || ehigh == NULL || etri == NULL) {
+            if (starts != NULL) { tg_free(starts, start_bytes); }
+            if (cursor != NULL) { tg_free(cursor, cur_bytes); }
+            if (ehigh != NULL) { tg_free(ehigh, high_bytes); }
+            if (etri != NULL) { tg_free(etri, tri_bytes); }
+            result = TG_ERR_OUT_OF_MEMORY;
+            goto cleanup;
+        }
+
+        /* Count per lower-vertex bucket. An edge whose endpoints weld to the same
+         * point is skipped: the triangle is geometrically degenerate, the zero-area
+         * check has already reported it, and counting it here would make it
+         * masquerade as a hole. */
         for (i = 0; i < tri_count; ++i) {
             u64 base = (u64)sp->first_index + i * 3u;
             u32 v[3];
@@ -346,141 +448,195 @@ static TgResult validate_section_topology(const Mesh *m, MeshSection s,
             v[1] = canon[ind[base + 1] - sp->first_vertex];
             v[2] = canon[ind[base + 2] - sp->first_vertex];
             for (k = 0; k < 3; ++k) {
-                u32 a = v[k];
-                u32 b = v[(k + 1u) % 3u];
-                EdgeRec *e;
-                if (a == b) {
-                    /* Two corners welded to the same point: the triangle is
-                     * geometrically degenerate. Already reported by the
-                     * zero-area check; skipping it here stops it masquerading
-                     * as a hole. */
-                    continue;
-                }
-                e = &edges[ne++];
-                if (a < b) {
-                    e->ukey = ((u64)a << 32) | (u64)b;
-                    e->dir = 1u;
-                } else {
-                    e->ukey = ((u64)b << 32) | (u64)a;
-                    e->dir = 0u;
-                }
-                e->tri = (u32)i;
+                u32 a = v[k], b = v[(k + 1u) % 3u];
+                if (a == b) { continue; }
+                starts[(a < b) ? a : b]++;
+                ne++;
             }
         }
-        edge_count = ne;
-    }
-
-    radix_sort_edges(edges, tmp, edge_count);
-
-    /* Walk equal-ukey groups. */
-    i = 0;
-    while (i < edge_count) {
-        u64 j = i + 1;
-        while (j < edge_count && edges[j].ukey == edges[i].ukey) { j++; }
-        {
-            u64 n = j - i;
-            u64 tri_a = sp->first_triangle + edges[i].tri;
-            if (n == 1) {
-                r->boundary_edges[s]++;
-                if (info->require_closed_manifold) {
-                    record(r, MESH_ISSUE_BOUNDARY_EDGE, s, tri_a);
-                }
-                /* An open section's boundary edges are expected; they are still
-                 * counted so the report can show the tear length of a flake. */
-            } else if (n == 2) {
-                if (edges[i].dir == edges[i + 1].dir) {
-                    /* Both triangles traverse the shared edge in the same
-                     * direction: one of them is wound backwards. This is the
-                     * classic cause of a black facet on an otherwise clean
-                     * trunk. */
-                    record(r, MESH_ISSUE_INCONSISTENT_WINDING, s, tri_a);
-                } else {
-                    uf_union(parent, edges[i].tri, edges[i + 1].tri);
-                }
-            } else {
-                /* More than two: a duplicated internal tube wall, a T-junction,
-                 * or two organs welded through the same edge. */
-                record(r, MESH_ISSUE_NON_MANIFOLD_EDGE, s, tri_a);
+        {   /* Prefix sum into bucket starts, and a cursor to fill them. */
+            u32 acc = 0;
+            for (i = 0; i <= vcount; ++i) {
+                u32 c = (i < vcount) ? starts[i] : 0u;
+                starts[i] = acc;
+                cursor[i] = acc;
+                acc += c;
             }
         }
-        i = j;
-    }
-
-    /* Duplicate triangles: an exact repeat produces three duplicated undirected
-     * edges, which the pass above sees as non-manifold. Detect it explicitly so
-     * the diagnostic names the real cause. Done by sorting a canonical
-     * per-triangle key reusing the same buffers. */
-    {
         for (i = 0; i < tri_count; ++i) {
             u64 base = (u64)sp->first_index + i * 3u;
-            u32 a = ind[base + 0], b = ind[base + 1], c = ind[base + 2];
+            u32 v[3];
+            u32 k;
+            v[0] = canon[ind[base + 0] - sp->first_vertex];
+            v[1] = canon[ind[base + 1] - sp->first_vertex];
+            v[2] = canon[ind[base + 2] - sp->first_vertex];
+            for (k = 0; k < 3; ++k) {
+                u32 a = v[k], b = v[(k + 1u) % 3u];
+                u32 lo, hi, slot;
+                bool forward;
+                if (a == b) { continue; }
+                forward = (a < b);
+                lo = forward ? a : b;
+                hi = forward ? b : a;
+                slot = cursor[lo]++;
+                ehigh[slot] = hi;
+                /* Direction in the top bit. A section cannot hold more than 2^31
+                 * triangles and mesh_reserve refuses long before that, so the bit is
+                 * genuinely free rather than borrowed. */
+                etri[slot] = (u32)i | (forward ? 0x80000000u : 0u);
+            }
+        }
+
+        /* Walk each bucket, grouping by the high vertex. Buckets are tiny -- a
+         * vertex has a handful of incident edges -- so an insertion sort inside one
+         * is cheaper than any global sort and needs no scratch. It is also stable,
+         * which keeps the reported example ids reproducible. */
+        for (i = 0; i < vcount; ++i) {
+            u32 from = starts[i], to = starts[i + 1u];
+            u32 p, q;
+            for (p = from + 1u; p < to; ++p) {
+                u32 kh = ehigh[p], kt = etri[p];
+                q = p;
+                while (q > from && ehigh[q - 1u] > kh) {
+                    ehigh[q] = ehigh[q - 1u];
+                    etri[q] = etri[q - 1u];
+                    q--;
+                }
+                ehigh[q] = kh;
+                etri[q] = kt;
+            }
+            p = from;
+            while (p < to) {
+                u32 e = p + 1u;
+                while (e < to && ehigh[e] == ehigh[p]) { e++; }
+                {
+                    u32 n = e - p;
+                    u64 tri_a = sp->first_triangle + (etri[p] & 0x7FFFFFFFu);
+                    if (n == 1u) {
+                        r->boundary_edges[s]++;
+                        if (info->require_closed_manifold) {
+                            record(r, MESH_ISSUE_BOUNDARY_EDGE, s, tri_a);
+                        }
+                        /* An open section's boundary edges are expected; they are
+                         * still counted so the report can show the tear length of a
+                         * flake. */
+                    } else if (n == 2u) {
+                        if ((etri[p] & 0x80000000u) == (etri[p + 1u] & 0x80000000u)) {
+                            /* Both triangles traverse the shared edge in the same
+                             * direction: one of them is wound backwards. This is the
+                             * classic cause of a black facet on an otherwise clean
+                             * trunk. */
+                            record(r, MESH_ISSUE_INCONSISTENT_WINDING, s, tri_a);
+                        } else {
+                            uf_union(parent, etri[p] & 0x7FFFFFFFu,
+                                     etri[p + 1u] & 0x7FFFFFFFu);
+                        }
+                    } else {
+                        /* More than two: a duplicated internal tube wall, a
+                         * T-junction, or two organs welded through the same edge. */
+                        record(r, MESH_ISSUE_NON_MANIFOLD_EDGE, s, tri_a);
+                    }
+                }
+                p = e;
+            }
+        }
+        tg_free(starts, start_bytes);
+        tg_free(cursor, cur_bytes);
+        tg_free(ehigh, high_bytes);
+        tg_free(etri, tri_bytes);
+    }
+
+    /* --- Phase C: duplicate triangles ------------------------------------- */
+    /* An exact repeat produces three duplicated undirected edges, which the pass
+     * above sees as non-manifold. Detected explicitly so the diagnostic names the
+     * real cause. */
+    {
+        u64 key_bytes, val_bytes;
+        u64 *key = NULL, *ktmp = NULL;
+        u32 *val = NULL, *vtmp = NULL;
+        if (!tg_ckd_mul_u64(tri_count, sizeof(u64), &key_bytes) ||
+            !tg_ckd_mul_u64(tri_count, sizeof(u32), &val_bytes)) {
+            result = TG_ERR_OVERFLOW;
+            goto cleanup;
+        }
+        key = (u64 *)tg_alloc(key_bytes);
+        ktmp = (u64 *)tg_alloc(key_bytes);
+        val = (u32 *)tg_alloc(val_bytes);
+        vtmp = (u32 *)tg_alloc(val_bytes);
+        if (key == NULL || ktmp == NULL || val == NULL || vtmp == NULL) {
+            if (key != NULL) { tg_free(key, key_bytes); }
+            if (ktmp != NULL) { tg_free(ktmp, key_bytes); }
+            if (val != NULL) { tg_free(val, val_bytes); }
+            if (vtmp != NULL) { tg_free(vtmp, val_bytes); }
+            result = TG_ERR_OUT_OF_MEMORY;
+            goto cleanup;
+        }
+        for (i = 0; i < tri_count; ++i) {
+            u64 base = (u64)sp->first_index + i * 3u;
             u32 key3[3];
-            key3[0] = a; key3[1] = b; key3[2] = c;
+            key3[0] = ind[base + 0];
+            key3[1] = ind[base + 1];
+            key3[2] = ind[base + 2];
             sort3_u32(key3);
             /* Fold the sorted triple into 64 bits. Collisions are possible in
-             * principle for very large meshes, so a hit is confirmed by
-             * comparing the actual vertex sets below. */
-            edges[i].ukey = ((u64)key3[0] * 0x9E3779B97F4A7C15ull)
-                          ^ ((u64)key3[1] * 0xC2B2AE3D27D4EB4Full)
-                          ^ ((u64)key3[2] * 0x165667B19E3779F9ull);
-            edges[i].tri = (u32)i;
-            edges[i].dir = 0;
+             * principle for very large meshes, so a hit is confirmed by comparing
+             * the actual vertex sets below. */
+            key[i] = ((u64)key3[0] * 0x9E3779B97F4A7C15ull)
+                   ^ ((u64)key3[1] * 0xC2B2AE3D27D4EB4Full)
+                   ^ ((u64)key3[2] * 0x165667B19E3779F9ull);
+            val[i] = (u32)i;
         }
-        radix_sort_edges(edges, tmp, tri_count);
+        radix_sort_u64_u32(key, val, ktmp, vtmp, tri_count);
         for (i = 1; i < tri_count; ++i) {
-            if (edges[i].ukey != edges[i - 1].ukey) { continue; }
+            if (key[i] != key[i - 1]) { continue; }
             {
-                u64 ba = (u64)sp->first_index + (u64)edges[i - 1].tri * 3u;
-                u64 bb = (u64)sp->first_index + (u64)edges[i].tri * 3u;
+                u64 ba = (u64)sp->first_index + (u64)val[i - 1] * 3u;
+                u64 bb = (u64)sp->first_index + (u64)val[i] * 3u;
                 u32 sa[3], sb[3], k;
                 for (k = 0; k < 3; ++k) { sa[k] = ind[ba + k]; sb[k] = ind[bb + k]; }
                 sort3_u32(sa);
                 sort3_u32(sb);
                 if (sa[0] == sb[0] && sa[1] == sb[1] && sa[2] == sb[2]) {
                     record(r, MESH_ISSUE_DUPLICATE_TRIANGLE, s,
-                           sp->first_triangle + edges[i].tri);
+                           sp->first_triangle + val[i]);
                 }
             }
         }
+        tg_free(key, key_bytes);
+        tg_free(ktmp, key_bytes);
+        tg_free(val, val_bytes);
+        tg_free(vtmp, val_bytes);
     }
 
-    /* Per-component enclosed volume. Signed volume of a closed outward-wound
-     * surface is positive; computing it per connected component means a single
-     * inverted leaf cannot hide inside the sum over thousands of leaves. */
+    /* --- Phase D: per-component enclosed volume --------------------------- */
+    /* Signed volume of a closed outward-wound surface is positive; computing it per
+     * connected component means a single inverted leaf cannot hide inside the sum
+     * over thousands of leaves. */
     if (info->require_outward_orientation) {
-        /* Per-component enclosed volume by the divergence theorem.
-         *
-         * NUMERICAL NOTE, and the reason for the two-pass structure. The obvious
+        /* NUMERICAL NOTE, and the reason for the two-pass structure. The obvious
          * formulation sums dot(a, cross(b, c))/6 over the triangles, which is
          * analytically independent of where the origin sits. In float it is not.
          * Each term scales with |p|^3 while the sum is the (tiny) volume, so the
-         * cancellation ratio grows as (distance from origin / feature size)^3.
-         * A leaf 20 m from the model origin with millimetre features loses on
-         * the order of ten significant digits -- enough for a perfectly correct
-         * leaf to report a negative volume and be rejected.
+         * cancellation ratio grows as (distance from origin / feature size)^3. A leaf
+         * 20 m from the model origin with millimetre features loses on the order of
+         * ten significant digits -- enough for a perfectly correct leaf to report a
+         * negative volume and be rejected.
          *
          * This was measured, not assumed: the same sphere translated by
          * (-40, 77, 12) gave 0.5391 instead of 0.5199, a 3.7% error.
          *
-         * The fix is to evaluate each component about its OWN reference point.
-         * Volume is translation invariant, so this changes nothing analytically
-         * and removes the cancellation entirely. */
+         * The fix is to evaluate each component about its OWN reference point. Volume
+         * is translation invariant, so this changes nothing analytically and removes
+         * the cancellation entirely. */
         f64 *vol;
         V3  *ref;
         bool *has_ref;
-        u64 vol_bytes, ref_bytes, hasref_bytes, extra;
+        u64 vol_bytes, ref_bytes, hasref_bytes;
 
         if (!tg_ckd_mul_u64(tri_count, sizeof(f64), &vol_bytes) ||
             !tg_ckd_mul_u64(tri_count, sizeof(V3), &ref_bytes) ||
             !tg_ckd_mul_u64(tri_count, sizeof(bool), &hasref_bytes)) {
             result = TG_ERR_OVERFLOW;
-            goto cleanup;
-        }
-        extra = vol_bytes + ref_bytes + hasref_bytes;
-        if (total_scratch + extra > opt->max_scratch_bytes) {
-            record(r, MESH_ISSUE_SCRATCH_LIMIT, s, total_scratch + extra);
-            r->topology_not_checked = true;
-            result = TG_ERR_LIMIT_EXCEEDED;
             goto cleanup;
         }
         vol = (f64 *)tg_alloc_zero(vol_bytes);
@@ -494,8 +650,8 @@ static TgResult validate_section_topology(const Mesh *m, MeshSection s,
             goto cleanup;
         }
 
-        /* Pass 1: one reference point per component. Taken from the lowest
-         * triangle id in the component, so it is deterministic. */
+        /* Pass 1: one reference point per component. Taken from the lowest triangle
+         * id in the component, so it is deterministic. */
         for (i = 0; i < tri_count; ++i) {
             u32 root = uf_find(parent, (u32)i);
             if (!has_ref[root]) {
@@ -533,18 +689,17 @@ static TgResult validate_section_topology(const Mesh *m, MeshSection s,
         tg_free(ref, ref_bytes);
         tg_free(has_ref, hasref_bytes);
     } else {
-        /* Still report component count for open sections; useful for knowing
-         * how many separate bark flakes exist. */
+        /* Still report component count for open sections; useful for knowing how
+         * many separate bark flakes exist. */
         for (i = 0; i < tri_count; ++i) {
             if (uf_find(parent, (u32)i) == (u32)i) { r->closed_components[s]++; }
         }
     }
+    TG_UNUSED(ne);
 
 cleanup:
-    if (edges != NULL) { tg_free(edges, edge_bytes); }
-    if (tmp != NULL) { tg_free(tmp, tmp_bytes); }
-    if (parent != NULL) { tg_free(parent, parent_bytes); }
     if (canon != NULL) { tg_free(canon, canon_bytes); }
+    if (parent != NULL) { tg_free(parent, parent_bytes); }
     return result;
 }
 

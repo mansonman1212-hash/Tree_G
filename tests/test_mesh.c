@@ -1036,7 +1036,119 @@ static void test_empty_mesh(void) {
     mesh_destroy(&m);
 }
 
+/* Emits an axis-aligned box as a closed, outward-wound solid: 8 vertices, 12
+ * triangles. Used to build a mesh large enough that the topology check's scratch
+ * budget matters. */
+/* Failures are ACCUMULATED rather than asserted per call. Asserting inside the
+ * helper added 336 000 checks to the suite for 24 000 boxes, which is both slow in a
+ * debug build and noise in the per-suite check count that regressions are read
+ * against. */
+static u32 emit_box(Mesh *m, V3 lo, V3 hi, u32 organ) {
+    u32 failures = 0;
+    static const u8 face[6][4] = {
+        { 0u, 2u, 3u, 1u },  /* -z */
+        { 4u, 5u, 7u, 6u },  /* +z */
+        { 0u, 1u, 5u, 4u },  /* -y */
+        { 2u, 6u, 7u, 3u },  /* +y */
+        { 0u, 4u, 6u, 2u },  /* -x */
+        { 1u, 3u, 7u, 5u }   /* +x */
+    };
+    u32 idx[8];
+    u32 i;
+    for (i = 0; i < 8u; ++i) {
+        MeshVertex v;
+        memset(&v, 0, sizeof v);
+        v.position = v3((i & 1u) ? hi.x : lo.x,
+                        (i & 2u) ? hi.y : lo.y,
+                        (i & 4u) ? hi.z : lo.z);
+        v.normal = v3_norm_or(v3_sub(v.position, v3_scale(v3_add(lo, hi), 0.5f)),
+                              v3(0.0f, 1.0f, 0.0f));
+        v.tangent = v3(1.0f, 0.0f, 0.0f);
+        v.color = 0xFF808080u;
+        v.ao = 1.0f;
+        v.organ_id = organ;
+        v.attrib = mesh_pack_attrib(MESH_MAT_BARK_MATURE, MESH_SECTION_WOOD, 0);
+        if (mesh_add_vertex(m, &v, &idx[i]) != TG_OK) { failures++; }
+    }
+    for (i = 0; i < 6u; ++i) {
+        if (mesh_add_quad(m, idx[face[i][0]], idx[face[i][1]], idx[face[i][2]],
+                          idx[face[i][3]], organ) != TG_OK) {
+            failures++;
+        }
+    }
+    return failures;
+}
+
+static void test_topology_scratch_is_a_peak_not_a_sum(void) {
+    enum { BOXES = 24000 };   /* 288 000 triangles, 192 000 vertices          */
+    Mesh m;
+    MeshValidateReport rep;
+    MeshValidateOptions opt;
+    u32 i;
+
+    TG_T_CASE("a large mesh validates within a budget the old accounting refused");
+    /* The topology check runs four phases -- position welding, edge classification,
+     * duplicate-triangle detection, per-component volume -- and each releases its
+     * working set before the next allocates. It used to check the caller's limit
+     * against the SUM of all four, and to materialise a 16-byte record per directed
+     * edge plus a radix-sort scratch buffer of the same size.
+     *
+     * That was not a conservative simplification. It refused to verify the topology of
+     * the two largest trees in the project -- a 20.5-million-triangle broadleaf and a
+     * 17-million-triangle conifer -- at a two-gibibyte limit, which is exactly where a
+     * topological defect is most likely and least visible. Both now verify at one
+     * gibibyte, and an 80-year broadleaf verifies at the library's 512 MiB default.
+     *
+     * The budget below is chosen to sit between the two: comfortably above the peak
+     * the phased implementation needs for this mesh, and comfortably below what the
+     * summed accounting would have demanded. A regression to the old scheme fails
+     * here rather than only on a tree too big to put in a test. */
+    TG_EXPECT_OK(mesh_init(&m, BOXES * 8u + 16u, BOXES * 12u + 16u));
+    TG_EXPECT_OK(mesh_begin_section(&m, MESH_SECTION_WOOD));
+    {
+        u32 emit_failures = 0;
+        for (i = 0; i < (u32)BOXES; ++i) {
+            f32 x = (f32)(i % 200u) * 1.0f;
+            f32 z = (f32)(i / 200u) * 1.0f;
+            emit_failures += emit_box(&m, v3(x, 0.0f, z),
+                                      v3(x + 0.5f, 0.5f, z + 0.5f), i);
+        }
+        TG_EXPECT_MSG(emit_failures == 0u, "%u appends failed while building the "
+                                           "fixture", emit_failures);
+    }
+    TG_EXPECT_OK(mesh_end_section(&m));
+    TG_EXPECT_OK(mesh_finalize(&m));
+
+    opt = mesh_validate_default_options();
+    opt.max_scratch_bytes = (u64)16 * 1024 * 1024;
+    TG_EXPECT_OK(mesh_validate(&m, &opt, &rep));
+    TG_EXPECT_MSG(!rep.topology_not_checked,
+                  "topology was skipped: %llu triangles were refused a 16 MiB "
+                  "budget", (unsigned long long)mesh_triangle_count(&m));
+    TG_EXPECT_MSG(rep.passed, "a mesh of %d disjoint boxes failed validation", BOXES);
+    if (!rep.passed) { mesh_validate_log_report(&rep); }
+    TG_EXPECT_MSG(rep.closed_components[MESH_SECTION_WOOD] == (u32)BOXES,
+                  "%u closed components for %d boxes",
+                  rep.closed_components[MESH_SECTION_WOOD], BOXES);
+    TG_EXPECT_MSG(rep.boundary_edges[MESH_SECTION_WOOD] == 0,
+                  "%llu boundary edges on closed boxes",
+                  (unsigned long long)rep.boundary_edges[MESH_SECTION_WOOD]);
+    /* 0.5^3 per box, and the volume is what proves the winding is outward. */
+    TG_EXPECT_MSG(tg_absf((f32)rep.enclosed_volume[MESH_SECTION_WOOD]
+                          - (f32)BOXES * 0.125f) < 1.0f,
+                  "enclosed volume %.4f against an expected %.4f",
+                  rep.enclosed_volume[MESH_SECTION_WOOD], (double)BOXES * 0.125);
+
+    TG_T_CASE("and a budget below the peak is still refused, not silently ignored");
+    opt.max_scratch_bytes = (u64)64 * 1024;
+    TG_EXPECT(mesh_validate(&m, &opt, &rep) != TG_OK);
+    TG_EXPECT_MSG(rep.topology_not_checked,
+                  "a 64 KiB budget was accepted for 288 000 triangles");
+    mesh_destroy(&m);
+}
+
 void test_suite_mesh(void) {
+    test_topology_scratch_is_a_peak_not_a_sum();
     test_vertex_layout();
     test_section_discipline();
     test_closed_tube_valid();

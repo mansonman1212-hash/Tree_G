@@ -434,10 +434,19 @@ shape does not depend on rounding.
    tube, so a large fraction of those triangles are inside other triangles.
    `mesh_junction` (welding unions) and a mesh-level LOD are the next work, and
    until they exist the triangle count should be read as an upper bound.
-6. **Mesh validation cannot run on the largest tree.** The 220-year case exceeds
-   the topology scratch buffers. It is now reported as `NOT VALIDATED` rather than
-   `INVALID`, which was the previous behaviour and conflated "failed the checks"
-   with "was never checked".
+6. ~~**Mesh validation cannot run on the largest tree.**~~ **FIXED.** The check runs
+   four phases -- position welding, edge classification, duplicate-triangle detection,
+   per-component volume -- and each releases its working set before the next
+   allocates, but the limit was checked against the SUM of all four. It also
+   materialised a 16-byte record per directed edge plus a radix-sort scratch buffer of
+   the same size: 1.97 GB for the edge phase alone on a 20.5-million-triangle section.
+   The phases are now sequenced and the edges counting-sorted into buckets keyed by
+   their lower welded vertex, which removes the scratch buffer and halves the record to
+   8 bytes. The 220-year broadleaf and the 80-year conifer both verify at a **1 GiB**
+   limit where they previously failed at 2 GiB, and an 80-year broadleaf verifies at
+   the library's **512 MiB default**. A 288 000-triangle fixture in `test_mesh.c`
+   verifies within 16 MiB -- measured peak 10.4 MB -- and would fail under the summed
+   accounting.
 7. **Very old individuals no longer truncate, but only just.** The 220-year tree
    completes all 220 steps at 1 190 126 organs against a 1 400 000 ceiling. It has
    no crown retrenchment, so nothing bounds the accumulation from above; a
@@ -459,8 +468,10 @@ shape does not depend on rounding.
    still not a spruce: at close range the naked pale twigs are what dominates.
    Reaching full coverage means 13.5 million needles, 81 million triangles and about
    4.4 GB, which is beyond what a single tree can be given.
-11. **The conifer mesh now exceeds the topology scratch limit too**, for the same
-   reason the 220-year broadleaf does, and is reported as NOT VALIDATED.
+11. ~~**The conifer mesh exceeds the topology scratch limit too.**~~ **FIXED** by the
+   same change as 6. It reports VALID with zero boundary edges and 77 175 closed
+   components -- one per axis, which is the unwelded-tube count and is what item 5
+   above is about.
 12. **The BVH is a median split, not a surface-area heuristic.** Adequate for
    geometry as uniformly distributed as a tree's surface, and the cost achieved is
    reported rather than assumed, but a proper SAH build would give shallower trees

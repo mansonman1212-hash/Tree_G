@@ -41,10 +41,13 @@ static TgResult build_tree(Built *b, TreeCategory cat, f32 age, TreeQuality q,
     s.quality = q;
     s.seed = seed;
     s.season = season;
-    /* Generous, because this tool exists to validate: a mature tree's topology
-     * needs more scratch than an interactive session would allocate, and a report
-     * that says NOT VALIDATED because the tool was frugal is worthless. */
-    opt.validate_scratch_bytes = (u64)2048 * 1024 * 1024;
+    /* One gibibyte. This used to be two, and it still could not verify the two
+     * largest trees, because the check reported the SUM of its four phases rather
+     * than their peak and materialised a 16-byte record per directed edge. With the
+     * phases sequenced and the edges bucketed, the largest tree in the project needs
+     * well under half this. Deliberately not raised further: a limit that is never
+     * approached stops being a check on anything. */
+    opt.validate_scratch_bytes = (u64)1024 * 1024 * 1024;
     return tree_build(&s, &opt, b);
 }
 
