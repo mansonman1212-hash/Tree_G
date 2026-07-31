@@ -410,10 +410,51 @@ shape does not depend on rounding.
 
 ### Remaining defects, stated plainly
 
-1. **Conifer self-shading mortality is zero.** Not merely low: no conifer shoot
-   dies of shade. 41 056 shoots sit pinned at the crown surface and none is ever
-   overtopped. Its lower crown is now shed by crown recession (1 344 events)
-   instead, which cleans the skirt but is not the same mechanism.
+1. ~~**Conifer self-shading mortality is zero.**~~ **FIXED.** It was zero for an
+   arithmetic reason, not a tuning one. A shoot's light is bounded below by the
+   diffuse sky floor (0.10 of full sun), reduced by the branch-order penalty and
+   lifted again by shade tolerance; for the conifer that lower bound is **0.1944**,
+   and its `light_death_threshold` was **0.07**. No conifer shoot could ever be
+   shade-killed however deeply buried it was, because the darkest light the model
+   can produce was still nearly three times the threshold. The broadleaf was not
+   safe either, merely lucky: bound 0.1576 against a threshold of 0.16, a ratio of
+   0.985, which is why its mortality moved whenever anything unrelated changed.
+
+   That bound is now a computed, exposed quantity — `tree_light_minimum(profile)` —
+   and `tree_profile_validate` **refuses** any profile whose threshold is not at
+   least 1/0.9 above it. Thresholds moved to 0.20 (broadleaf) and 0.26 (conifer);
+   shade tolerance, which is where tolerance belongs, was not touched.
+
+   Measured at 60 years, draft, before and after:
+
+   | | broadleaf | conifer |
+   |---|---|---|
+   | shade deaths before | 2 619 | **0** |
+   | shade deaths after | 5 013 | **14 815** |
+   | dead shoot segments before | 11.7% | **6.0%** |
+   | dead shoot segments after | 40.2% | 37.8% |
+   | shoot segments before → after | 143 043 → 112 293 | 179 477 → 132 546 |
+
+   Note the direction. Making shade death *possible* raised mortality sixfold and
+   made the tree 26% smaller in shoot count, because a shoot that self-prunes stops
+   contributing to the shade cast on its neighbours. Mortality here is the crown
+   regulating its own density, and its absence was not a mild inaccuracy.
+
+   This also retired a test that had never tested anything. The growth suite
+   carried a gate labelled *"KNOWN DEFECT GATE: conifer self-shading mortality is
+   too high"*, citing 78.4% of shoot segments dying of shade against a
+   believed-correct figure under 40%, set to fail above 82%. The true value at that
+   commit was 6.0% with zero shade deaths: the 78.4% described a tree that had
+   ceased to exist, and a one-sided limit of 0.82 in front of 0.06 cannot catch a
+   regression. It is replaced by a two-sided band (15%–65%) plus a positive
+   assertion that `stopped_by_shade > 0` for **both** categories, and by a profile
+   test asserting reachability for every built-in profile with a non-vacuity probe
+   that reintroduces the 0.07 threshold and requires a refusal. The conifer is now
+   at 37.8%, inside the range the old comment called correct.
+
+   Visual review (gate 8) confirmed the crowns were not over-thinned: both retain
+   dense foliage, and the broadleaf shows the correct top-dense/bottom-sparse
+   gradient with a visibly self-pruned grey interior.
 2. **Crown recession is prescribed, not emergent.** A shoot whose base falls below
    the live crown base is shed. That is a real phenomenon and the live crown base
    is a resolved property of the individual, but the shedding is imposed rather
@@ -461,13 +502,16 @@ shape does not depend on rounding.
    change of character at the buttress. The terracing gives a crease at the top of
    each wall; genuinely fractured bark needs a second, finer field and the sampling
    to carry it.
-10. **The conifer still reads as speckle at 22% needle coverage.** An evergreen now
+10. **The conifer still reads as speckle, now at 49% needle coverage.** An evergreen
    gets twice the foliage budget and coarser wood -- justified by occlusion, since a
    conifer's shoots are completely clothed and its wood invisible -- which took
-   coverage from 10.5% to 22.2% and 3.0 million needles. It is visibly better and
-   still not a spruce: at close range the naked pale twigs are what dominates.
-   Reaching full coverage means 13.5 million needles, 81 million triangles and about
-   4.4 GB, which is beyond what a single tree can be given.
+   coverage from 10.5% to 22.2%. Making shade death reachable (item 1) then took it
+   to **49.2%**, not by placing more needles but by removing the shoots that were
+   asking for them: demand fell from 13.5 million needles to **6 103 025** while
+   placements held at **2 999 695**. That is a real improvement in what a viewer
+   sees per triangle spent, and it is still not a spruce -- at close range the naked
+   pale twigs dominate. Full coverage remains out of reach: 6.1 million needles is
+   36.6 million triangles on top of 24.0 million of wood.
 11. ~~**The conifer mesh exceeds the topology scratch limit too.**~~ **FIXED** by the
    same change as 6. It reports VALID with zero boundary edges and 77 175 closed
    components -- one per axis, which is the unwelded-tube count and is what item 5

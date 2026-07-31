@@ -92,6 +92,17 @@ const char *tree_health_name(TreeHealth h) {
     return "invalid";
 }
 
+f32 tree_light_minimum(const TreeProfile *p) {
+    /* Mirrors estimate_light with the transmittance driven to zero and the canopy
+     * open, which is the darkest a shoot can be. The order penalty is the growth
+     * pass's, capped the same way. */
+    f32 order_penalty = 1.0f - 0.06f * (f32)tg_min_u32(p->max_branch_order, 5u);
+    f32 raw = TG_DIFFUSE_LIGHT_FLOOR * order_penalty;
+    TG_CHECK(p != NULL);
+    /* Shade tolerance lifts the floor rather than removing the gradient. */
+    return tg_lerpf(raw, sqrtf(tg_saturatef(raw)), tg_saturatef(p->shade_tolerance));
+}
+
 const char *tree_quality_name(TreeQuality q) {
     switch (q) {
     case QUALITY_DRAFT:     return "draft";
@@ -255,7 +266,11 @@ static const TreeProfile g_broadleaf[] = {
         1.6f,                           /* influence_radius_m                */
         0.42f,                          /* kill_radius_m                     */
 
-        0.16f,                          /* light_death_threshold             */
+        /* Above the darkest light this profile allows (0.1576), with margin, so a
+         * deeply shaded shoot can actually die. At 0.16 it grazed that minimum: shade
+         * mortality existed but was one rounding from vanishing, which is why it
+         * moved whenever anything unrelated changed. */
+        0.20f,                          /* light_death_threshold             */
         4,                              /* suppression_tolerance_steps       */
         0.45f,                          /* shade_tolerance                   */
 
@@ -370,7 +385,12 @@ static const TreeProfile g_conifer[] = {
          * shoot segments dead before this was corrected. Evergreen conifers do
          * hold suppressed branches for many years, so a longer tolerance is
          * biologically right as well as necessary. */
-        0.07f,                          /* light_death_threshold             */
+        /* A fir tolerates deep shade, but its lowest whorls do die, and for that the
+         * threshold has to sit ABOVE the diffuse floor. At 0.07 against an achievable
+         * minimum of 0.1944 it sat far below, so no conifer shoot could be
+         * shade-killed however deeply buried -- self-pruning did not exist. Tolerance
+         * is expressed by shade_tolerance, which stays high. */
+        0.26f,                          /* light_death_threshold             */
         7,                              /* suppression_tolerance_steps       */
         0.55f,                          /* shade_tolerance                   */
 
@@ -554,6 +574,25 @@ TgResult tree_profile_validate(const TreeProfile *p) {
                    "juvenile_height_rate is inconsistent with the height curve");
     }
     TP_REQUIRE(p->tip_radius_m > 0.0f, "non-positive tip radius");
+
+    /* SHADE DEATH MUST BE REACHABLE.
+     *
+     * The diffuse floor, the order penalty and the shade-tolerance lift together fix
+     * the darkest light any shoot of this profile can experience. If that minimum is
+     * not comfortably below light_death_threshold then no shoot can ever be
+     * shade-killed, and self-pruning silently does not exist -- which is what
+     * happened: the conifer's threshold was 0.07 against an achievable minimum of
+     * 0.194, so its shade mortality was not low, it was exactly zero, and nothing in
+     * the suite noticed because nothing asked.
+     *
+     * The 0.9 margin is there because a threshold that merely grazes the minimum
+     * gives mortality that exists on paper and is one rounding away from vanishing.
+     * The broadleaf sat at 0.985 of its threshold, which is why its mortality was so
+     * sensitive to unrelated changes. */
+    TP_REQUIRE(tree_light_minimum(p) < p->light_death_threshold * 0.9f,
+               "shade death is unreachable: the darkest light this profile allows is "
+               "not below 0.9 of its light_death_threshold, so no shoot can ever be "
+               "shade-killed");
     TP_REQUIRE(p->wood_modulus_pa > 1.0e8f, "implausibly low wood modulus");
     TP_REQUIRE(p->wood_density_kgm3 > 100.0f, "implausibly low wood density");
     TP_REQUIRE(p->sag_retention >= 0.0f && p->sag_retention <= 1.0f,

@@ -321,6 +321,23 @@ typedef struct TreeProfile {
     f32 needle_width_m;
 } TreeProfile;
 
+/* Diffuse sky light reaching even a fully shaded shoot, as a fraction of full sun.
+ *
+ * Lives here rather than as a literal inside the growth pass because profile
+ * validation has to know it. Without it there is no way to check the one thing that
+ * makes shade mortality possible at all -- that the darkest light a shoot can
+ * experience is actually below its death threshold. That check was missing, and the
+ * conifer's threshold sat at 0.07 against an achievable minimum of 0.194, so no
+ * conifer shoot could ever die of shade however deeply buried it was. */
+#define TG_DIFFUSE_LIGHT_FLOOR 0.10f
+
+/* The darkest light any shoot of this profile can experience, in the open.
+ *
+ * Combines the diffuse floor, the deepest order penalty the profile's branch orders
+ * can reach, and the shade-tolerance lift. Exposed so that the profile validator, the
+ * growth pass and the tests all agree on one number instead of three. */
+f32 tree_light_minimum(const TreeProfile *p);
+
 /* Built-in profiles. Small in number and correct, rather than many and wrong. */
 u32                tree_profile_count(TreeCategory category);
 const TreeProfile *tree_profile_get(TreeCategory category, u32 index);

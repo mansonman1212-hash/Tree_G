@@ -146,7 +146,9 @@ otherwise be likely to ship.
 | shade mortality height bias | mortality that exists but is not actually shade driven |
 | isotropic-light control case | crown asymmetry that appears without a cause |
 | root/crown radius ratio | root spread scaled from height, giving a 12:1 plate on the conifer |
-| conifer mortality gate | a recorded known defect silently getting worse |
+| two-sided mortality band plus `stopped_by_shade > 0` for both categories | self-pruning that does not exist. This replaces a one-sided "known defect gate" set to fail above 82% mortality while the true value was 6.0% with zero shade deaths -- it had been passing by a factor of thirteen against a figure recorded from a tree that no longer existed. A gate with only an upper bound cannot see a mechanism switch off |
+| shade death REACHABILITY per profile, with a non-vacuity probe | a `light_death_threshold` below the darkest light the light model can produce, which makes shade mortality arithmetically impossible rather than merely rare. The conifer shipped at 0.07 against a floor of 0.1944; every existing test asked how much mortality there was, none asked whether the mechanism could fire at all. The probe reintroduces 0.07 and requires a refusal |
+| thinning test PINS the foliage budget to half the tree's own demand | a test losing its own precondition. It twice chose an age instead and twice stopped testing anything when unrelated changes pushed demand below the budget -- first when the evergreen budget doubled, then when shade mortality became reachable and the tree shed the shoots that were asking for needles. Halving the tree's own measured demand cannot stop binding |
 | own-bend sign audit inside the pass | a deflection sign error hidden by rigid propagation, which legitimately lifts back-pointing branches |
 | deflection vs an unbent baseline | comparing a bent segment against its parent, which gravitropism already makes point more upward |
 | pipe relation tested directly, not at "branch points" | a test that found zero checkable cases because laterals hang off buds, and so asserted nothing |
@@ -195,20 +197,22 @@ Run on the development host (Linux x86-64), both available compilers:
 
 | Configuration | Result |
 |---|---|
-| clang 15.0.7, release (`-O2 -DNDEBUG`) | 448 cases, 711 007 checks, 0 failures |
-| gcc 11.5.0, release | 448 cases, 711 007 checks, 0 failures |
-| clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | every suite run individually, 0 failures |
+| clang 15.0.7, release (`-O2 -DNDEBUG`) | 452 cases, 680 589 checks, 0 failures |
+| gcc 11.5.0, release | 452 cases, 680 589 checks, 0 failures |
+| clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | 452 cases, 680 589 checks, 0 failures, one run |
 | gcc 11.5.0, debug | compiles clean; `geom/junction`, `geom/mesh`, `tree/build`, `tree/bark`, `tree/foliage` run, 0 failures |
 
-The two release runs produce **byte-identical output**, including identical per-suite
-check counts.
+All three complete runs produce **identical case and check counts**, including
+identical per-suite counts, across two compilers and both optimisation settings.
+The debug run exercises every `TG_CHECK` internal assertion, which the release
+build compiles out.
 
-The debug configurations are recorded as suite-by-suite rather than as one run, and the
-reason is stated rather than glossed: `tree/mechanics` alone takes about eleven minutes
-at `-O0`, which exceeds the single-command time limit available in this development
-sandbox. Every suite was run and every suite passed; the aggregate line was not produced
-in one process. gcc debug was exercised on the suites touching the code changed in this
-checkpoint plus the mesh and geometry suites, not on all fourteen.
+The check total FELL from 711 007 to 680 589 while the case count rose from 448 to
+452. That is not lost coverage: making shade death reachable made the trees smaller
+(179 477 shoot segments to 132 546 for the 60-year conifer), and several suites
+accumulate one check per organ. Four new cases were added -- the two-sided mortality
+band, per-profile shade reachability, its non-vacuity probe, and the pinned-budget
+thinning precondition.
 
 **Determinism, measured across compilers and configurations.** Four builds -- clang and
 gcc, `-O0 -DTG_DEBUG=1` and `-O2 -DNDEBUG` -- produce byte-identical tree fingerprints,

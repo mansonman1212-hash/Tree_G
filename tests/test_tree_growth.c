@@ -372,33 +372,71 @@ static void test_broadleaf_vs_conifer(void) {
                       (double)(root_r_cf / crown_r_cf));
     }
 
-    TG_T_CASE("KNOWN DEFECT GATE: conifer self-shading mortality is too high");
-    /* This gate records a defect rather than endorsing it.
+    TG_T_CASE("both categories self-prune: mortality is substantial and shade-caused");
+    /* This replaces a gate that spent its whole life asserting nothing.
      *
-     * The conifer's narrow conical envelope combined with an annual whorl of
-     * laterals produces a shoot density about nine times the broadleaf's per
-     * unit crown volume, and 78.4% of its shoot segments die of self-shading.
-     * The believed-correct figure is under 40%. Resolving it needs the crown to
-     * be judged visually, which is not yet possible in this environment, so
-     * blind numeric tuning was stopped rather than continued.
+     * It was labelled "KNOWN DEFECT GATE: conifer self-shading mortality is too
+     * high", it cited 78.4% of shoot segments dying of self-shading against a
+     * believed-correct figure under 40%, and it was set to fail above 82% so the
+     * defect "could not silently get worse". Measured at the commit before this
+     * one, the conifer's actual dead fraction was 6.0% and its shade deaths were
+     * exactly ZERO -- its light_death_threshold sat at 0.07 against a darkest
+     * achievable light of 0.194, so no conifer shoot could ever be shade-killed
+     * however deeply buried. The 78.4% belonged to a tree that no longer existed.
+     * A one-sided gate at 0.82 in front of a true value of 0.06 does not catch
+     * regressions; it just passes.
      *
-     * The gate is therefore set just above the measured value: it cannot silently
-     * get worse, and it will fail loudly if someone tightens it to the real
-     * target before the underlying crowding is fixed. See docs/limitations.md. */
+     * So the gate is now two-sided and names its cause. Mortality is asserted to
+     * be in the band a real tree of this age occupies, and shade is asserted to be
+     * an actual mechanism rather than a field in a struct. Measured with shade
+     * death reachable: broadleaf 40.2% dead / 5,013 shade stops, conifer 37.8%
+     * dead / 14,815 shade stops.
+     *
+     * Note which direction the fix moved things. Making shade death POSSIBLE
+     * raised mortality from 6% to 38% and simultaneously made the tree smaller
+     * (179,477 shoot segments to 132,546), because a shoot that self-prunes stops
+     * contributing to the shade cast on its neighbours. Mortality here is not
+     * damage, it is the crown regulating its own density. */
     {
-        u32 seg = 0, seg_dead = 0, i;
-        for (i = 0; i < tree_graph_organ_count(&cf); ++i) {
-            const Organ *o = tree_graph_organ(&cf, i);
-            if (!organ_type_is_segment((OrganType)o->type)) { continue; }
-            if (o->type == ORGAN_ROOT_SEGMENT) { continue; }
-            seg++;
-            if ((o->flags & ORGAN_FLAG_DEAD) != 0) { seg_dead++; }
+        u32 i;
+        struct { const char *name; const TreeGraph *g; const GrowthResult *gr; }
+            cases[2];
+        cases[0].name = "broadleaf"; cases[0].g = &bl; cases[0].gr = &gbl;
+        cases[1].name = "conifer";   cases[1].g = &cf; cases[1].gr = &gcf;
+
+        for (i = 0; i < 2u; ++i) {
+            u32 seg = 0, seg_dead = 0, k;
+            f32 frac;
+            for (k = 0; k < tree_graph_organ_count(cases[i].g); ++k) {
+                const Organ *o = tree_graph_organ(cases[i].g, k);
+                if (!organ_type_is_segment((OrganType)o->type)) { continue; }
+                if (o->type == ORGAN_ROOT_SEGMENT) { continue; }
+                seg++;
+                if ((o->flags & ORGAN_FLAG_DEAD) != 0) { seg_dead++; }
+            }
+            TG_EXPECT(seg > 1000);
+            frac = (f32)seg_dead / (f32)tg_max_u32(seg, 1u);
+            /* Two-sided. The lower bound is the half that was missing: a tree of
+             * this age that has shed almost nothing has not been growing in
+             * competition with itself. */
+            TG_EXPECT_MSG(frac > 0.15f,
+                          "%s shed only %.1f%% of its shoot segments in 60 years: "
+                          "a crown that never self-prunes is not competing with "
+                          "itself, so its density is unregulated",
+                          cases[i].name, (double)(100.0f * frac));
+            TG_EXPECT_MSG(frac < 0.65f,
+                          "%s shed %.1f%% of its shoot segments: mortality this "
+                          "high means the crown over-thickens and then mass-dies "
+                          "rather than thinning as it goes",
+                          cases[i].name, (double)(100.0f * frac));
+            /* Causality, not just magnitude. This is the assertion whose absence
+             * let a profile ship with shade death arithmetically impossible. */
+            TG_EXPECT_MSG(cases[i].gr->stopped_by_shade > 0u,
+                          "%s recorded zero shade deaths: self-pruning does not "
+                          "exist for this profile, so whatever killed those shoots "
+                          "was not shade",
+                          cases[i].name);
         }
-        TG_EXPECT(seg > 1000);
-        TG_EXPECT_MSG((f32)seg_dead / (f32)tg_max_u32(seg, 1u) < 0.82f,
-                      "conifer dead shoot-segment fraction is %.1f%%, worse than "
-                      "the recorded 78.4%%",
-                      (double)(100.0f * (f32)seg_dead / (f32)seg));
     }
 
     TG_T_CASE("both categories generate a root system within the organ budget");

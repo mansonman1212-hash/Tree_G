@@ -72,6 +72,28 @@ static void built_destroy(Built *b) {
     tree_graph_destroy(&b->graph);
 }
 
+/* Throws away the foliage geometry and rebuilds it against a different triangle
+ * budget, reusing the grown and bent skeleton.
+ *
+ * This exists so a test can MANUFACTURE the condition that the budget binds
+ * instead of picking an age and hoping. Hoping has now failed twice: the test
+ * below originally used age 30, the evergreen budget doubled and the whole demand
+ * fitted, so it was moved to 55; then shade mortality became reachable, the tree
+ * shed shoots, demand fell to 2.64 million and it fitted again. Both times the
+ * test did not report a wrong tree -- it reported that it could no longer see the
+ * thing it was written to watch. A precondition that depends on unrelated botany
+ * is not a precondition, so this pins it. */
+static TgResult refoliate(Built *b, u64 triangle_budget) {
+    TgResult r;
+
+    mesh_destroy(&b->mesh);
+    b->resolved.foliage_triangle_budget = triangle_budget;
+    r = mesh_init(&b->mesh, 1u << 14, 1u << 15);
+    if (r != TG_OK) { return r; }
+    return tree_foliage_build(&b->mesh, &b->graph, &b->resolved,
+                              (u16)b->resolved.growth_steps, &b->foliage);
+}
+
 /* ------------------------------------------------------------------------- */
 
 static void test_area_agrees_with_mechanics(void) {
@@ -227,14 +249,22 @@ static void test_thinning_is_uniform(void) {
      * would spend the whole budget on the oldest wood and leave the outer crown --
      * the part anybody looks at -- bald. This measures the placed fraction in the
      * lower and upper halves of the crown and requires them to agree. */
-    /* Age 55 rather than 30. An evergreen now receives twice the foliage budget --
-     * its wood is completely occluded by needles, so spending the geometry on the
-     * wood was spending it on a surface nobody can see -- and at 30 years the whole
-     * demand of 1.57 million needles fits inside it, so there was no thinning left
-     * to measure. At 55 the tree asks for 5.9 million and the budget is the limit,
-     * which is the condition this test exists for. */
+    /* The budget is PINNED to half of this tree's own measured demand rather than
+     * left to whatever the quality level happens to grant. Two earlier versions
+     * chose an age instead (30, then 55) and both silently stopped testing
+     * anything when unrelated changes moved the demand below the budget: the
+     * evergreen budget doubled, then shade mortality became reachable and the
+     * tree shed the shoots that were asking for needles. Halving the tree's OWN
+     * demand cannot stop binding, whatever the botany later does. */
     TG_EXPECT_OK(build(&b, TREE_CATEGORY_CONIFER, 55.0f, QUALITY_DRAFT,
                        SEASON_SUMMER, false));
+    TG_EXPECT_MSG(b.foliage.leaves_wanted > 0u && b.foliage.triangles_per_leaf > 0u,
+                  "a 55-year conifer asked for %llu needles at %u triangles each: "
+                  "there is no demand to thin, so the tree is wrong, not the budget",
+                  (unsigned long long)b.foliage.leaves_wanted,
+                  b.foliage.triangles_per_leaf);
+    TG_EXPECT_OK(refoliate(&b, b.foliage.leaves_wanted
+                               * (u64)b.foliage.triangles_per_leaf / 2u));
     TG_EXPECT_MSG(b.foliage.leaves_placed < b.foliage.leaves_wanted,
                   "%llu of %llu placed: nothing was thinned, so uniformity of "
                   "thinning cannot be measured",

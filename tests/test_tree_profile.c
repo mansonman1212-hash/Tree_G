@@ -23,6 +23,54 @@ static void test_builtin_profiles_are_coherent(void) {
         }
     }
 
+    TG_T_CASE("shade death is REACHABLE for every built-in profile");
+    /* The property whose absence went unnoticed for the whole of Layer 2.
+     *
+     * A shoot's light is bounded below by the diffuse sky floor, reduced by the
+     * order penalty and lifted again by shade tolerance. That lower bound is a
+     * number the profile fixes, and if it is not below light_death_threshold then
+     * no shoot of that profile can EVER be shade-killed. The conifer shipped with
+     * a threshold of 0.07 against a bound of 0.194, so its self-pruning was not
+     * weak, it was arithmetically impossible -- and nothing failed, because every
+     * existing test asked how much mortality there was rather than whether the
+     * mechanism could fire at all.
+     *
+     * Asserted here as well as inside tree_profile_validate deliberately. The
+     * validator makes a bad profile impossible to introduce; this makes the reason
+     * legible, and prints the two numbers when someone edits a threshold. */
+    for (cat = 0; cat < TREE_CATEGORY_COUNT; ++cat) {
+        u32 n = tree_profile_count((TreeCategory)cat);
+        for (i = 0; i < n; ++i) {
+            const TreeProfile *p = tree_profile_get((TreeCategory)cat, i);
+            f32 lo;
+            if (p == NULL) { continue; }
+            lo = tree_light_minimum(p);
+            TG_EXPECT_MSG(lo < p->light_death_threshold * 0.9f,
+                          "profile '%s': darkest achievable light %.4f is not "
+                          "below 0.9 x its death threshold %.4f, so no shoot can "
+                          "ever be shade-killed",
+                          p->name, (double)lo,
+                          (double)p->light_death_threshold);
+            /* And the floor must genuinely be a floor: a profile cannot claim a
+             * minimum brighter than full sun, nor a non-positive one, or the
+             * comparison above would be meaningless in the other direction. */
+            TG_EXPECT_MSG(lo > 0.0f && lo < 1.0f,
+                          "profile '%s': darkest achievable light %.4f is not a "
+                          "fraction of full sun", p->name, (double)lo);
+        }
+    }
+
+    TG_T_CASE("the shade-reachability rule actually rejects an unreachable profile");
+    /* Non-vacuity. Reintroduce the exact defect and require a refusal. */
+    {
+        TreeProfile bad = *tree_profile_get(TREE_CATEGORY_CONIFER, 0);
+        bad.light_death_threshold = 0.07f;   /* the value that shipped */
+        TG_EXPECT_MSG(tree_profile_validate(&bad) != TG_OK,
+                      "a threshold of 0.07 against a minimum of %.4f was accepted: "
+                      "the reachability rule is not doing anything",
+                      (double)tree_light_minimum(&bad));
+    }
+
     TG_T_CASE("out-of-range profile lookups return NULL");
     TG_EXPECT(tree_profile_get(TREE_CATEGORY_BROADLEAF, 999) == NULL);
     TG_EXPECT(tree_profile_get(TREE_CATEGORY_COUNT, 0) == NULL);
