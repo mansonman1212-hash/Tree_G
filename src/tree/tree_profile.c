@@ -103,6 +103,20 @@ f32 tree_light_minimum(const TreeProfile *p) {
     return tg_lerpf(raw, sqrtf(tg_saturatef(raw)), tg_saturatef(p->shade_tolerance));
 }
 
+f32 tree_dead_branch_retention(const TreeProfile *p, f32 radius_m) {
+    f32 rel, years;
+    TG_CHECK(p != NULL);
+    /* 5 mm is the reference thickness the profile value is quoted at. */
+    rel = tg_maxf(radius_m, 1.0e-4f) / 0.005f;
+    years = p->dead_branch_retention_years
+          * powf(rel, TG_ABSCISSION_RADIUS_EXPONENT);
+    /* Floor of one year so nothing is shed in the same step it died -- a branch
+     * that dies and vanishes within the year never existed as far as anything
+     * looking at the tree is concerned, and the recently dead are part of what a
+     * real crown shows. */
+    return tg_clampf(years, 1.0f, 200.0f);
+}
+
 const char *tree_quality_name(TreeQuality q) {
     switch (q) {
     case QUALITY_DRAFT:     return "draft";
@@ -223,7 +237,11 @@ static const TreeProfile g_broadleaf[] = {
         0.43f,                          /* juvenile_height_rate m/yr         */
         1.15f,                          /* crown_width_ratio: wider than tall */
         2.40f, 2.60f,                   /* crown fullness: full dome, both ways */
-        0.52f,                          /* crown_widest_at: rounded crown    */
+        /* crown_widest_at, young then mature. Equal: the upward migration of the
+         * widest point is measured for spruce, not for an oak, so none is claimed
+         * here rather than one being invented. The rendered dome is correct at
+         * this value and there is no evidence with which to move it. */
+        0.52f, 0.52f,
         0.28f,                          /* crown_base_height_ratio           */
 
         8,                              /* max_branch_order                  */
@@ -273,6 +291,11 @@ static const TreeProfile g_broadleaf[] = {
         0.20f,                          /* light_death_threshold             */
         4,                              /* suppression_tolerance_steps       */
         0.45f,                          /* shade_tolerance                   */
+        /* dead_branch_retention_years at 5 mm. An oak cleans itself relatively
+         * well: dead twigs in the interior of the crown drop within a few seasons,
+         * which is how a broadleaf comes to have a clean bole under a dense crown.
+         * At this value a 2 mm twig holds ~2.4 years and a 60 mm limb ~19. */
+        4.0f,
 
         2.49f,                          /* leonardo_exponent (see research)  */
         0.0022f,                        /* tip_radius_m                      */
@@ -340,7 +363,14 @@ static const TreeProfile g_conifer[] = {
         0.71f,
         0.36f,                          /* crown_width_ratio: narrow cone     */
         1.60f, 1.00f,                   /* crown fullness: straight cone above */
-        0.06f,                          /* crown_widest_at: near the base      */
+        /* crown_widest_at, young then mature. A young spruce is widest at its
+         * base; a middle-aged or mature one carries its greatest width and foliage
+         * density at 50-70% of crown height, because the lowest whorls are old,
+         * shaded and dying back while the upper crown is still extending. 0.55 is
+         * the lower-middle of that measured range. Held at 0.06 for every age, the
+         * envelope put the whole crown width on the ground and tapered to nothing
+         * at the apex, which is the naked spire recorded as defect 3. */
+        0.06f, 0.55f,
         0.10f,                          /* crown_base_height_ratio: low skirt  */
 
         /* Three orders, not four. A conifer whorl already contributes five
@@ -393,6 +423,12 @@ static const TreeProfile g_conifer[] = {
         0.26f,                          /* light_death_threshold             */
         7,                              /* suppression_tolerance_steps       */
         0.55f,                          /* shade_tolerance                   */
+        /* dead_branch_retention_years at 5 mm, double the broadleaf's. Firs and
+         * spruces are notorious for holding their dead lower branches -- a spruce
+         * bole is characteristically rough with dry stubs -- so this is a real
+         * difference between the two habits and not a tuning knob. At this value a
+         * 2 mm twig holds ~4.8 years and a 60 mm limb ~38. */
+        8.0f,
 
         2.30f,                          /* leonardo_exponent                 */
         0.0016f,
@@ -545,6 +581,16 @@ TgResult tree_profile_validate(const TreeProfile *p) {
     TP_REQUIRE(p->crown_width_ratio > 0.0f, "non-positive crown width ratio");
     TP_REQUIRE(p->crown_widest_at >= 0.0f && p->crown_widest_at <= 1.0f,
                "crown_widest_at outside [0,1]");
+    TP_REQUIRE(p->crown_widest_at_mature >= 0.0f
+                   && p->crown_widest_at_mature <= 1.0f,
+               "crown_widest_at_mature outside [0,1]");
+    /* The widest point may stay put, but it may not travel DOWN the crown with
+     * age. A crown whose broadest point sinks as the tree matures would mean the
+     * lowest, most shaded whorls outgrowing the leader, which is the opposite of
+     * every measurement and of the apical control this engine models. */
+    TP_REQUIRE(p->crown_widest_at_mature >= p->crown_widest_at,
+               "crown_widest_at_mature is below crown_widest_at: the widest point "
+               "of a crown does not migrate downward with age");
     TP_REQUIRE(p->crown_lower_fullness >= 0.6f && p->crown_lower_fullness <= 6.0f,
                "crown_lower_fullness outside [0.6,6]");
     TP_REQUIRE(p->crown_upper_fullness >= 0.6f && p->crown_upper_fullness <= 6.0f,
@@ -593,6 +639,9 @@ TgResult tree_profile_validate(const TreeProfile *p) {
                "shade death is unreachable: the darkest light this profile allows is "
                "not below 0.9 of its light_death_threshold, so no shoot can ever be "
                "shade-killed");
+    TP_REQUIRE(p->dead_branch_retention_years > 0.0f
+                   && p->dead_branch_retention_years < 100.0f,
+               "dead_branch_retention_years outside (0,100)");
     TP_REQUIRE(p->wood_modulus_pa > 1.0e8f, "implausibly low wood modulus");
     TP_REQUIRE(p->wood_density_kgm3 > 100.0f, "implausibly low wood density");
     TP_REQUIRE(p->sag_retention >= 0.0f && p->sag_retention <= 1.0f,
@@ -944,8 +993,24 @@ TgResult tree_profile_resolve(const TreeSettings *settings, TreeResolved *out) {
                     /* Shade kills lower branches, lifting the live crown. This
                      * is the mechanism, not a cosmetic offset. */
                     + 0.42f * env->canopy_closure, 0.02f, 0.80f);
-    out->crown_widest_height_m = tg_lerpf(out->crown_base_height_m, out->height_m,
-                                          tg_clampf(p->crown_widest_at, 0.02f, 0.98f));
+    {
+        /* The widest point MIGRATES UP the crown as the individual matures. Held
+         * constant, the conifer wore its juvenile shape at 80 years: all of its
+         * width at the ground and an envelope tapering to zero radius at the apex,
+         * so the top of the crown was bare by construction rather than by any
+         * growth dynamic. Measured on the grown tree, laterals filled 108-131% of
+         * the envelope in every height band, which is what proves the envelope was
+         * the binding constraint and not the extension rate.
+         *
+         * smoothstep over the same 0..0.8 maturity window the crown WIDTH already
+         * uses, so the two aspects of crown shape mature together instead of one
+         * lagging the other. */
+        f32 widest_rel = tg_lerpf(p->crown_widest_at, p->crown_widest_at_mature,
+                                  tg_smoothstepf(0.0f, 0.8f, out->maturity));
+        out->crown_widest_height_m =
+            tg_lerpf(out->crown_base_height_m, out->height_m,
+                     tg_clampf(widest_rel, 0.02f, 0.98f));
+    }
 
     /* --- crown asymmetry and displacement ---------------------------------
      * Asymmetry is CAUSAL: it comes from light anisotropy, wind and health, and

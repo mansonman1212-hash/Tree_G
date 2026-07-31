@@ -42,6 +42,12 @@
 typedef struct SkinResult {
     u32 axes_meshed;
     u32 axes_skipped_empty;
+    /* Axes that produced no geometry because the whole axis had dropped off, and
+     * organs skipped part-way along an axis for the same reason. Reported rather
+     * than merely done: "the tree has fewer triangles than last week" needs an
+     * attributable cause. */
+    u32 axes_skipped_shed;
+    u32 organs_shed_not_skinned;
     u32 rings_emitted;
     u32 vertices;
     u32 triangles;

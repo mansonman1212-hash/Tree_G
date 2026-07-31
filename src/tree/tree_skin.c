@@ -477,6 +477,20 @@ static TgResult sweep_axis(SkinCtx *c, u32 axis_id) {
         const Organ *o = tree_graph_organ(g, id);
         u32 child, next = TG_INVALID_ID;
 
+        /* A branch that has dropped off is not skinned. The abscission pass only
+         * sheds an organ once every child of it is shed, so the shed part of an
+         * axis is always a distal SUFFIX and stopping here leaves a stub that the
+         * distal cap below closes properly -- no hole, and no need for the sweep to
+         * understand abscission beyond this test.
+         *
+         * Before this existed, every branch that ever died was skinned at full
+         * length for the rest of the tree's life: the 80-year conifer wore a
+         * fifteen-metre skirt of pale dead twigs under its live crown. */
+        if ((o->flags & ORGAN_FLAG_SHED) != 0) {
+            c->out->organs_shed_not_skinned++;
+            break;
+        }
+
         if (first) {
             r = emit_ring(c, o, frame_at(o, 0.0f), o->radius_base, 0.0f, 0.0f,
                           0.0f, nseg, c->ring_a);
@@ -543,9 +557,13 @@ static TgResult sweep_axis(SkinCtx *c, u32 axis_id) {
         r = emit_cap(c, last_organ, c->ring_a, nseg, organ_tip(last_organ),
                      last_organ->direction, true, 1.0f);
         if (r != TG_OK) { return r; }
+        c->out->axes_meshed++;
+    } else {
+        /* The axis's very first organ had dropped off, so the whole axis is gone.
+         * Nothing was emitted -- not even the basal cap, since the shed test
+         * precedes it -- so this must not be counted as an axis that was meshed. */
+        c->out->axes_skipped_shed++;
     }
-
-    c->out->axes_meshed++;
     return TG_OK;
 }
 

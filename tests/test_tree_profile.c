@@ -545,27 +545,80 @@ static void test_crown_envelope(void) {
         TG_EXPECT(rad <= rb.crown_width_m * 0.5f + 1e-4f);
     }
 
-    TG_T_CASE("a conifer envelope is widest near its base, a broadleaf mid-crown");
-    /* This single test distinguishes an excurrent cone from a decurrent dome,
-     * which is the most visible difference between the two categories. */
+    TG_T_CASE("the widest point of a conifer crown MIGRATES UP with age");
+    /* This case used to assert that a conifer is widest near its base at every
+     * age, and it passed because the profile said so with a single constant. The
+     * expectation was wrong rather than the code: Kantola and Makela measured
+     * Norway spruce foliage density peaking at 50-70% of relative crown height in
+     * middle-aged and mature stands, with only YOUNG crowns densest and widest at
+     * the base. Holding the juvenile value for life gave the 80-year conifer all of
+     * its width on the ground and an envelope tapering to zero radius at the apex,
+     * which is the naked upper leader recorded as defect 3 in limitations.md. The
+     * grown tree confirmed the envelope was the cause and not the extension rate:
+     * laterals filled 108-131% of the allowed radius in every height band, so they
+     * were pressed against the envelope wall, not falling short of it.
+     *
+     * So the property to assert is the migration, not either endpoint. */
+    {
+        f32 widest_young, widest_mature;
+        u32 pass;
+        f32 found[2];
+        for (pass = 0; pass < 2u; ++pass) {
+            TreeSettings sc = tree_settings_default(TREE_CATEGORY_CONIFER);
+            TreeResolved r;
+            f32 best_h = 0.0f, best_r = -1.0f;
+            sc.age_years = (pass == 0u) ? 10.0f : 90.0f;
+            TG_EXPECT_OK(tree_profile_resolve(&sc, &r));
+            for (i = 0; i <= 400; ++i) {
+                f32 tt = (f32)i / 400.0f;
+                f32 h = tg_lerpf(r.crown_base_height_m, r.height_m, tt);
+                f32 v = tree_resolved_envelope_radius(&r, h);
+                if (v > best_r) { best_r = v; best_h = tt; }
+            }
+            found[pass] = best_h;
+        }
+        widest_young = found[0];
+        widest_mature = found[1];
+        TG_EXPECT_MSG(widest_young < 0.25f,
+                      "a 10-year conifer is widest at %.3f of its crown; a young "
+                      "spruce is widest at its base", (double)widest_young);
+        TG_EXPECT_MSG(widest_mature > 0.45f && widest_mature < 0.75f,
+                      "a 90-year conifer is widest at %.3f of its crown; the "
+                      "measured range for a mature spruce is 0.50-0.70",
+                      (double)widest_mature);
+        /* And the direction, stated separately so a profile that happened to sit
+         * inside both bands without actually migrating still fails. */
+        TG_EXPECT_MSG(widest_mature > widest_young + 0.20f,
+                      "the widest point moved from %.3f to %.3f between 10 and 90 "
+                      "years: the crown is not changing shape as it matures",
+                      (double)widest_young, (double)widest_mature);
+    }
+
+    TG_T_CASE("a broadleaf envelope is widest mid-crown");
     {
         f32 best_h_b = 0.0f, best_r_b = -1.0f;
-        f32 best_h_c = 0.0f, best_r_c = -1.0f;
         for (i = 0; i <= 400; ++i) {
             f32 tb = (f32)i / 400.0f;
             f32 hb = tg_lerpf(rb.crown_base_height_m, rb.height_m, tb);
-            f32 hc = tg_lerpf(rc.crown_base_height_m, rc.height_m, tb);
             f32 vb = tree_resolved_envelope_radius(&rb, hb);
-            f32 vc = tree_resolved_envelope_radius(&rc, hc);
             if (vb > best_r_b) { best_r_b = vb; best_h_b = tb; }
-            if (vc > best_r_c) { best_r_c = vc; best_h_c = tb; }
         }
-        TG_EXPECT_MSG(best_h_c < 0.25f,
-                      "conifer widest at %.3f of the crown, expected near the base",
-                      (double)best_h_c);
         TG_EXPECT_MSG(best_h_b > 0.30f && best_h_b < 0.75f,
                       "broadleaf widest at %.3f of the crown, expected mid-crown",
                       (double)best_h_b);
+    }
+
+    TG_T_CASE("the widest point may not migrate DOWN the crown with age");
+    /* Non-vacuity for the coherence rule, and a guard against someone "fixing" a
+     * shape by inverting the migration: that would mean the lowest, most shaded
+     * whorls outgrowing the leader. */
+    {
+        TreeProfile bad = *tree_profile_get(TREE_CATEGORY_CONIFER, 0);
+        bad.crown_widest_at = 0.60f;
+        bad.crown_widest_at_mature = 0.10f;
+        TG_EXPECT_MSG(tree_profile_validate(&bad) != TG_OK,
+                      "a crown whose widest point sinks from 0.60 to 0.10 with age "
+                      "was accepted");
     }
 
     TG_T_CASE("a conifer is taller and much narrower than a broadleaf of the same age");

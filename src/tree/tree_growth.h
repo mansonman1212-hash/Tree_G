@@ -92,6 +92,11 @@ typedef struct GrowthResult {
      * separately from shade because the two are different mechanisms and a bole
      * that fails to clean itself has to be attributable to one of them. */
     u32 stopped_by_recession;
+    /* Dead branches that have since dropped off. Filled by
+     * tree_growth_shed_dead_wood, which runs after the mechanics pass rather than
+     * during growth, because retention depends on radius. Reported next to the
+     * death counters so "died" and "fell off" can be told apart. */
+    u32 dead_organs_shed;
     u32 starved_steps;          /* step-instances with too little resource     */
     u32 extension_steps;        /* step-instances that actually extended       */
 
@@ -118,6 +123,27 @@ TgResult tree_growth_run(TreeGraph *graph, const TreeResolved *resolved,
  * alone -- roots must relate to the structure they actually support. */
 TgResult tree_growth_roots(TreeGraph *graph, const TreeResolved *resolved,
                            GrowthCancel *cancel, GrowthResult *out_result);
+
+/* Marks dead branches that have been dead long enough to have fallen off, with
+ * ORGAN_FLAG_SHED. Fills `out_result->dead_organs_shed`.
+ *
+ * MUST RUN AFTER tree_mechanics_run, because retention scales with radius and
+ * radii are the mechanics pass's output. It is a separate pass rather than part of
+ * growth for that reason alone -- the information it needs does not exist yet while
+ * the tree is growing.
+ *
+ * Death and detachment are different events, and this engine modelled only the
+ * first. ORGAN_FLAG_SHED existed in tree_graph.h from the beginning, described as
+ * "self-pruned: only a scar remains", and was set by nothing and read by nothing,
+ * so a branch that died in year 8 was still skinned at full length in year 80.
+ *
+ * An organ is shed only when every one of its children is already shed, so what is
+ * removed is always a distal suffix of an axis and no living wood is ever left
+ * hanging off nothing. Nothing is deleted: the organ keeps its id and its history,
+ * which is what lets the construction replay show a branch die and then drop. */
+TgResult tree_growth_shed_dead_wood(TreeGraph *graph,
+                                    const TreeResolved *resolved,
+                                    u16 final_step, GrowthResult *out_result);
 
 /* Exposed for the educational construction view and for tests: the attraction
  * point cloud that mediates crown competition. Never rendered as part of the

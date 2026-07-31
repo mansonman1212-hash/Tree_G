@@ -462,19 +462,112 @@ shape does not depend on rounding.
    it is well lit, so the transmittance model quite correctly spares it. Before the
    sweep existed the 80-year broadleaf carried its crown to within 2 m of the
    ground against a resolved crown base of 5.26 m.
-3. **The conifer's upper leader is too bare.** The leader tracks the height curve
-   and outruns its own laterals, leaving roughly the top fifth an almost naked
-   spire.
+
+   Its role has shrunk since, and that is a good sign rather than a loss: with shade
+   death reachable (item 1) and dead wood shed (item 16), the 80-year conifer now
+   sheds 32 005 shoots by shade against only **59** by crown recession, where
+   recession once did most of the cleaning. The prescribed mechanism is being
+   displaced by the emergent one.
+
+3. ~~**The conifer's upper leader is too bare.**~~ **FIXED**, and the cause stated
+   here was wrong. "The leader outruns its own laterals" is a claim about growth
+   RATE, and it was never measured. Measuring it disproved it: binning every shoot
+   tip of the 80-year conifer by height and comparing its reach against the envelope
+   allowed at that height, the laterals filled **108–131% of the envelope in every
+   band** — they were pressed against the envelope wall, not falling short of it.
+
+   The real cause was the envelope. `crown_widest_at` was a single constant, 0.06
+   for the conifer, so the crown was widest just above its base at **every age** and
+   the upper quadrant tapered as a pure cone (`crown_upper_fullness = 1.00`) to zero
+   radius at the apex. The top of the crown was bare *by construction*; no lateral
+   could have filled it however fast it grew.
+
+   [Kantola and Mäkelä's measurements of Norway spruce](https://link.springer.com/article/10.1007/s00468-004-0319-x)
+   report foliage density peaking at **50–70% of relative crown height in
+   middle-aged and mature stands**, while young crowns are densest and widest at the
+   base. A mature spruce is a spindle whose lower branches have thinned, not a
+   triangle standing on the ground. The widest point is therefore now **two**
+   values, and migrates up the crown with maturity over the same window the crown
+   width already used. *(Source content rephrased for licensing compliance.)*
+
+   Measured on the 80-year conifer: widest point **4.20 m → 15.96 m** (6% → 58% of
+   crown length), envelope radius 1.3 m below the apex **0.25 m → 0.74 m**. A
+   10-year tree still comes out widest at 8% of its crown, as it should. The test
+   asserts the **migration** — young below 0.25, mature within 0.45–0.75, and a
+   minimum travel of 0.20 between them, so a profile that happens to sit inside both
+   bands without actually changing shape still fails. The profile validator refuses
+   a crown whose widest point migrates *downward*.
+
+   The broadleaf's two values are equal. The migration is measured for spruce and
+   this engine has no equivalent measurement for an oak, so none is claimed for it.
+
+   **This fix immediately exposed a second, older defect** — see 16 below. Correcting
+   the crown shape let the lower whorls die as a mature spruce's do, and the tree
+   grew a fifteen-metre skirt of pale dead twigs, because nothing had ever removed
+   dead wood from the geometry.
+
+16. ~~**Dead branches never fall off.**~~ **FIXED.** `ORGAN_FLAG_SHED` was declared
+   in `tree_graph.h` from the beginning, described as *"self-pruned: only a scar
+   remains"*, and was **set by nothing and read by nothing**. Death and detachment
+   are different events and only the first was modelled, so a branch that died in
+   year 8 was still skinned at full length in year 80. The 80-year conifer carried
+   118 597 dead shoot segments, **60 596 of them dead for more than twenty years**,
+   and 98.8% of them had no living branch below them — nothing was holding them on.
+
+   Retention now scales as `(radius / 5 mm)^0.6` from a per-profile base: 4 years at
+   5 mm for the broadleaf, 8 for the conifer, because firs and spruces are notorious
+   for holding their dead lower branches while an oak cleans itself. The radius
+   scaling is the reason the result looks right rather than merely cleaner: fine
+   twigs go in a few years and thick limbs persist for decades, so what remains on
+   the bole is **short thick stubs**, which is what a spruce bole actually carries.
+   That emerges from the radius term rather than being modelled as a special case.
+
+   An organ is shed only when every child of it is already shed, so what is removed
+   is always a distal *suffix* of an axis. The skin pass therefore stops at the
+   first shed organ and lets the existing distal cap close the stub — no hole, and
+   no need for the sweep to understand abscission beyond one test. Dead **buds** are
+   transparent rather than blocking: a dead bud that pinned its branch would have
+   meant abscission never fired at all, since nearly every segment bears one. A
+   living bud does block, because an epicormic bud sits on old wood for decades.
+   Nothing is deleted — the organ keeps its id and its history, which is what will
+   let the construction replay show a branch die and then drop.
+
+   Every mesh still reports **VALID with zero boundary edges**, and the geometry
+   saved is large, because it was all invisible:
+
+   | tree | triangles before | after | closed components | BVH |
+   |---|---|---|---|---|
+   | broadleaf 80 | 10 726 412 | **8 321 364** (−22%) | 39 615 | 108.9 MiB |
+   | broadleaf 220 | 27 134 300 | **11 843 532** (−56%) | 222 683 → 48 278 | 452.4 → 160.7 MiB |
+   | conifer 80 | 23 955 306 | **21 594 140** (−10%) | 33 412 | 137.2 MiB |
+
+   Tested by re-deriving the rule organ by organ rather than by comparing
+   populations: an earlier version of the test compared the mean radius of shed
+   against retained dead wood and failed at 1.60 mm against 1.60 mm — not because
+   the radius term was missing but because this tree's dead wood is nearly all twigs
+   of one thickness, so the comparison measured the population rather than the rule.
+
+17. **The 220-year broadleaf is a bare pole under a parasol.** Newly recorded from a
+   capture, and **pre-existing** rather than caused by anything above: with the
+   crown-shape and abscission changes applied its graph is unchanged to the organ
+   (1 190 137 organs, 899 028 dead, 118 625 leaves, identical before and after), so
+   only its dead wood differs. The tree hits the organ ceiling, stops branching, and
+   its lower crown dies, leaving a ten-metre naked bole under a flat disc of foliage
+   with detached-looking clumps below. This is item 7's consequence made visible and
+   needs the retrenchment model, not a shape parameter.
 4. **The crown/height ratio may be too generous.** 19.19 m of crown on an 18.93 m
    broadleaf gives a leaf area index of 2.1 where a closed crown shows 4-6. The
    leaf area itself is correct, so either the crown is too wide or the tree should
    carry more foliage-bearing shoot. Not adjusted, because guessing which would be
    fitting one number by breaking another.
-5. **Mesh size is far beyond a real-time budget.** 10.7 to 20.5 million wood
-   triangles per tree at 851-1 617 MiB. Every branch is still a separate closed
-   tube, so a large fraction of those triangles are inside other triangles.
-   `mesh_junction` (welding unions) and a mesh-level LOD are the next work, and
-   until they exist the triangle count should be read as an upper bound.
+5. **Mesh size is still far beyond a real-time budget**, though materially less so.
+   Shedding dead wood (item 16) removed geometry that was invisible anyway: the
+   220-year broadleaf fell from 27.1 to **11.8 million** wood triangles (-56%) and
+   its BVH from 452 to **161 MiB**, the 80-year broadleaf to **8.3 million** and the
+   80-year conifer to **21.6 million**. Every surviving branch is still a separate
+   closed tube, so a large fraction of what remains is inside other triangles.
+   `mesh_junction` (welding unions) and a mesh-level LOD are the next work, and until
+   they exist the triangle count should be read as an upper bound.
 6. ~~**Mesh validation cannot run on the largest tree.**~~ **FIXED.** The check runs
    four phases -- position welding, edge classification, duplicate-triangle detection,
    per-component volume -- and each releases its working set before the next

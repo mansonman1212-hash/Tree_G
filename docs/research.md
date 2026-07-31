@@ -211,6 +211,51 @@ progress through a recorded state sequence (`ALIVE → SUPPRESSED → DEAD_WITH_
 → DEAD_STUB → OCCLUDED_SCAR`), which is what produces clustered lower-crown
 deadwood and knots instead of uniformly healthy branching.
 
+Two things had to be added before that sequence described anything real.
+
+**Shade death must be arithmetically reachable.** A shoot's light is bounded below
+by the diffuse sky floor, reduced by the branch-order penalty and lifted again by
+shade tolerance, and that bound is a number the profile fixes. If it is not below
+`light_death_threshold`, no shoot of that profile can ever be shade-killed. The
+conifer shipped with a threshold of 0.07 against a bound of 0.194: its self-pruning
+was not weak, it was impossible. The bound is now computed as `tree_light_minimum()`
+and the profile validator refuses a threshold that does not clear it with margin.
+Making shade death possible *raised* mortality from 6% to 38% and made the tree 26%
+smaller, because a shoot that self-prunes stops shading its neighbours — the
+mechanism regulates crown density rather than merely damaging the tree.
+
+**Death and detachment are different events.** A dead branch stays attached for a
+while and then falls off, and retention scales with thickness: fine twigs go within a
+few years while thick limbs persist for decades, which is why what remains on a bole
+is short dry stubs. Modelling only death left the 80-year conifer carrying 118 597
+dead shoot segments, 60 596 of them dead for over twenty years, as full-length
+geometry. Retention is now `base * (radius / 5 mm)^0.6`, with the conifer's base
+double the broadleaf's — firs and spruces are conspicuous for holding dead lower
+branches, an oak cleans itself.
+
+### 2.8 Crown envelope shape, and how it changes with age
+
+The envelope is a pair of super-ellipse quadrants about the widest point, and the
+**widest point migrates up the crown as the individual matures**. That migration is
+not a stylistic choice.
+[Kantola and Mäkelä (2004), *Crown development in Norway spruce*](https://link.springer.com/article/10.1007/s00468-004-0319-x)
+report foliage density peaking at 50–70% of relative crown height in middle-aged and
+mature stands, while young crowns are densest and widest at the base. A mature spruce
+is a spindle whose lowest whorls have thinned and died back, not a triangle standing
+on the ground. *(Content rephrased for compliance with licensing restrictions.)*
+
+Held at its juvenile value for life, the conifer's envelope put the whole crown width
+at ground level and tapered as a straight cone to zero radius at the apex, so the top
+of the crown was bare *by construction*. The distinction matters because the obvious
+diagnosis — "the leader outruns its laterals" — is about growth rate and was wrong:
+measured against the envelope, the laterals filled 108–131% of the radius allowed in
+every height band. They were pressed against the wall, not falling short of it. The
+lesson is the general one this project keeps relearning: measure which constraint is
+binding before adjusting the thing that looks responsible.
+
+No age migration is claimed for the broadleaf. The measurement is for spruce and
+there is no equivalent here for an oak.
+
 ---
 
 ## 3. Junction geometry: the single most important realism decision

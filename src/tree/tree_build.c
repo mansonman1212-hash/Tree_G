@@ -200,6 +200,17 @@ TgResult tree_build(const TreeSettings *settings, const TreeBuildOptions *option
     report(&opt, BUILD_STAGE_MECHANICS, 0.0f);
     r = tree_mechanics_run(&out->graph, &out->resolved, &out->mechanics);
     if (r != TG_OK) { out->failed_stage = BUILD_STAGE_MECHANICS; return r; }
+
+    /* Dead branches drop off. Placed HERE, after the mechanics pass and before the
+     * skin, because retention scales with radius and radii do not exist until the
+     * mechanics pass has assigned them -- and because the mechanics must load the
+     * tree with the branches it actually had while they were dying, not with the
+     * survivors. A branch that has fallen off still bent its parent for the years it
+     * hung there. */
+    r = tree_growth_shed_dead_wood(&out->graph, &out->resolved,
+                                   (u16)out->resolved.growth_steps,
+                                   &out->growth);
+    if (r != TG_OK) { out->failed_stage = BUILD_STAGE_MECHANICS; return r; }
     report(&opt, BUILD_STAGE_MECHANICS, 1.0f);
 
     /* --- mesh ------------------------------------------------------------- */

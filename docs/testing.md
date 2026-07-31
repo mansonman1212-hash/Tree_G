@@ -181,6 +181,11 @@ otherwise be likely to ship.
 | inseparable union emits NOTHING | a ring left unreachable: a hole the size of a branch, reported as success |
 | boundary normals perpendicular to their limb axis | normals taken from the clipped field rather than the smooth union, which is invisible to every topological check and renders as a dark sawtooth band around every seam; found by a capture, and the test was verified by reintroducing the defect |
 | region query checked against a linear scan, with the discarded algorithm run alongside | a summary query that samples and calls itself complete. The old version examined the first 4096 triangles and de-duplicated organs with a one-element memo against a spatially permuted traversal, reporting 25 organs where there were 6 while its own `truncated` flag read false. The old test asserted `organs > 0`, which is why a factor-of-four error passed for the whole of Layer 2. The case now reproduces the run-counting algorithm and requires it to DISAGREE on all four boxes, so it cannot become an identity |
+| the retention rule re-derived organ by organ, with `blocked` recomputed independently | abscission that sheds the wrong wood. An earlier version of this case compared the MEAN radius of shed against retained dead wood and failed at 1.60 mm against 1.60 mm -- not because the radius term was missing but because a 55-year conifer's dead wood is nearly all twigs of one thickness, so it was measuring the population instead of the rule. Population statistics are the wrong instrument for a per-organ predicate |
+| no shed organ may carry an attached child | living wood left hanging off nothing, and a hole in the skin: the axis sweep stops at the first shed organ and relies on the shed set being a distal suffix |
+| the wood revalidated for boundary and non-manifold edges AFTER shedding | a hole opened by truncating an axis part-way, which no amount of looking at the crown from outside would reveal |
+| the retention curve asserted monotonic in radius and floored at one year | a thicker dead branch dropping sooner than a twig, or a branch that dies and vanishes within the same step, which means it never existed as far as any observer is concerned |
+| crown widest point asserted to MIGRATE, with a minimum travel between young and mature | a shape parameter that satisfies both age bands without changing anything. The previous case asserted a conifer is widest near its base at every age and passed because the profile said so with one constant -- which is exactly the juvenile shape that left the 80-year tree's apex bare |
 | junction patch carries an organ id and a birth step | junction geometry that cannot be inspected, or that appears at step zero and shows a fully formed fork under a seedling |
 
 ## 5. Rules
@@ -198,9 +203,9 @@ Run on the development host (Linux x86-64), both available compilers:
 
 | Configuration | Result |
 |---|---|
-| clang 15.0.7, release (`-O2 -DNDEBUG`) | 453 cases, 680 604 checks, 0 failures |
-| gcc 11.5.0, release | 453 cases, 680 604 checks, 0 failures |
-| clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | 453 cases, 680 604 checks, 0 failures, one run |
+| clang 15.0.7, release (`-O2 -DNDEBUG`) | 460 cases, 680 627 checks, 0 failures |
+| gcc 11.5.0, release | 460 cases, 680 627 checks, 0 failures |
+| clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | 460 cases, 680 627 checks, 0 failures, one run |
 | gcc 11.5.0, debug | compiles clean; `geom/junction`, `geom/mesh`, `tree/build`, `tree/bark`, `tree/foliage` run, 0 failures |
 
 All three complete runs produce **identical case and check counts**, including
@@ -208,12 +213,13 @@ identical per-suite counts, across two compilers and both optimisation settings.
 The debug run exercises every `TG_CHECK` internal assertion, which the release
 build compiles out.
 
-The check total FELL from 711 007 to 680 604 while the case count rose from 448 to
-453. That is not lost coverage: making shade death reachable made the trees smaller
+The check total FELL from 711 007 to 680 627 while the case count rose from 448 to
+460. That is not lost coverage: making shade death reachable made the trees smaller
 (179 477 shoot segments to 132 546 for the 60-year conifer), and several suites
 accumulate one check per organ. Four new cases were added -- the two-sided mortality
 band, per-profile shade reachability, its non-vacuity probe, and the pinned-budget
-thinning precondition, plus the exact region query checked against a linear scan.
+thinning precondition, the exact region query checked against a linear scan, the
+crown-shape migration, and five cases covering dead-branch abscission.
 
 **Determinism, measured across compilers and configurations.** Four builds -- clang and
 gcc, `-O0 -DTG_DEBUG=1` and `-O2 -DNDEBUG` -- produce byte-identical tree fingerprints,

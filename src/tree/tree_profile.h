@@ -223,9 +223,24 @@ typedef struct TreeProfile {
     f32 crown_lower_fullness;
     f32 crown_upper_fullness;
 
-    /* Height fraction where the crown is widest. Broadleaf ~0.5 (rounded),
-     * conifer ~0.05 (conical, widest at the base). */
+    /* Relative height WITHIN THE LIVE CROWN at which the crown is widest, as a
+     * young tree and as a mature one. 0 is the crown base, 1 the apex.
+     *
+     * Two values rather than one because the widest point MIGRATES UP the crown
+     * with age, and treating it as a constant is what left this engine's 80-year
+     * conifer shaped like a juvenile. Kantola and Makela's measurements of Norway
+     * spruce report foliage density peaking at 50-70% of relative crown height in
+     * middle-aged and mature stands, while young crowns are densest and widest at
+     * the base -- so a mature spruce is a spindle whose lower branches have thinned,
+     * not a triangle standing on the ground. Held at 0.06 for all ages, the
+     * conifer's envelope pinched to nothing at the apex and put its whole width at
+     * the bottom, which is why the top of the crown read as a naked spire.
+     *
+     * See docs/research.md. The broadleaf's two values are equal: the migration is
+     * measured for spruce and this engine has no equivalent measurement for an oak,
+     * so no age dependence is claimed for it rather than one being invented. */
     f32 crown_widest_at;
+    f32 crown_widest_at_mature;
     f32 crown_base_height_ratio;   /* open-grown live-crown base / height    */
 
     /* Branching. Values are per branch ORDER where an array is given; index 0 is
@@ -283,6 +298,25 @@ typedef struct TreeProfile {
     u32 suppression_tolerance_steps;
     f32 shade_tolerance;           /* 0 = intolerant, 1 = very tolerant      */
 
+    /* Years a dead branch of 5 mm radius stays attached before it drops.
+     *
+     * Death and DETACHMENT are different events and this engine modelled only the
+     * first: ORGAN_FLAG_SHED was declared in tree_graph.h as "self-pruned: only a
+     * scar remains" and was set by nothing and read by nothing, so every branch
+     * that ever died was still skinned at full length eighty years later. The
+     * 80-year conifer carried 118 597 dead shoot segments, 60 596 of them dead for
+     * more than twenty years, and once the crown's widest point was allowed to
+     * migrate up with age its lower whorls died as they should and the tree grew a
+     * fifteen-metre skirt of pale dead twigs.
+     *
+     * Retention scales as (radius/5 mm)^TG_ABSCISSION_RADIUS_EXPONENT, so fine
+     * twigs go in a few years while a thick limb persists for decades. That
+     * scaling is the whole reason the result looks right rather than merely
+     * cleaner: what survives is short thick stubs projecting from the trunk, which
+     * is what a spruce bole actually carries, and it emerges from the radius rather
+     * than being modelled as a special case. */
+    f32 dead_branch_retention_years;
+
     /* Radial growth. */
     f32 leonardo_exponent;         /* r_parent^d = sum r_child^d             */
     f32 tip_radius_m;              /* radius of a first-year shoot tip       */
@@ -337,6 +371,16 @@ typedef struct TreeProfile {
  * can reach, and the shade-tolerance lift. Exposed so that the profile validator, the
  * growth pass and the tests all agree on one number instead of three. */
 f32 tree_light_minimum(const TreeProfile *p);
+
+/* How retention scales with branch thickness. Below 1 so that doubling the radius
+ * less than doubles the time attached: the load a dead branch must hold grows with
+ * its own mass while the decaying wood at its base weakens, so thickness buys time
+ * sub-linearly. */
+#define TG_ABSCISSION_RADIUS_EXPONENT 0.6f
+
+/* Years a dead branch of this radius stays attached to this profile's tree.
+ * Exposed so the abscission pass and the tests use one definition. */
+f32 tree_dead_branch_retention(const TreeProfile *p, f32 radius_m);
 
 /* Built-in profiles. Small in number and correct, rather than many and wrong. */
 u32                tree_profile_count(TreeCategory category);

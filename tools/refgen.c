@@ -195,6 +195,12 @@ static void report(const Built *b, const char *label) {
            b->growth.shoots_killed, b->growth.stopped_by_envelope);
     printf("             shed: %u by shade, %u by crown recession\n",
            b->growth.stopped_by_shade, b->growth.stopped_by_recession);
+    /* Death and DETACHMENT are separate events and used to be indistinguishable
+     * here, because dead branches were skinned for ever. */
+    printf("             %u dead organs have since dropped off; %u axes and %u "
+           "organs not skinned\n",
+           b->growth.dead_organs_shed, b->skin.axes_skipped_shed,
+           b->skin.organs_shed_not_skinned);
     printf("  graph      %s | %u organs, %u axes, %u segments, %u buds, "
            "%u dead, max order %u\n",
            gr.passed ? "VALID" : "INVALID",

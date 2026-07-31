@@ -723,8 +723,220 @@ static void test_construction_record(void) {
     tree_free(&t);
 }
 
+/* Abscission: dead branches fall off.
+ *
+ * ORGAN_FLAG_SHED was declared in tree_graph.h from the beginning, described as
+ * "self-pruned: only a scar remains", and was set by nothing and read by nothing.
+ * Every branch that ever died was therefore skinned at full length for the rest of
+ * the tree's life, and the 80-year conifer wore a fifteen-metre skirt of pale dead
+ * twigs under its live crown -- 118 597 dead shoot segments, 60 596 of them dead
+ * for more than twenty years. These are the properties that make the correction
+ * safe rather than merely tidier. */
+static void test_dead_wood_is_shed(void) {
+    TreeSettings s = settings_for(TREE_CATEGORY_CONIFER, 55.0f, QUALITY_DRAFT);
+    Tree t;
+    u32 i, n;
+    u32 shed = 0, shed_alive = 0, shed_root = 0, orphaned = 0, too_soon = 0;
+    u32 dead_kept = 0;
+    f64 shed_radius_sum = 0.0, kept_radius_sum = 0.0;
+    f64 shed_years_sum = 0.0, kept_years_sum = 0.0;
+    u16 final_step;
+
+    TG_EXPECT_OK(tree_build(&s, NULL, &t));
+    n = tree_graph_organ_count(&t.graph);
+    final_step = (u16)t.resolved.growth_steps;
+
+    TG_T_CASE("dead branches are shed, and only dead ones");
+    for (i = 0; i < n; ++i) {
+        const Organ *o = tree_graph_organ(&t.graph, i);
+        f32 radius, years;
+        if (!organ_type_is_segment((OrganType)o->type)) { continue; }
+        radius = 0.5f * (o->radius_base + o->radius_tip);
+        years = (o->death_step <= final_step)
+                  ? (f32)(final_step - o->death_step) : 0.0f;
+
+        if ((o->flags & ORGAN_FLAG_SHED) == 0) {
+            if ((o->flags & ORGAN_FLAG_DEAD) != 0
+                    && o->type != ORGAN_ROOT_SEGMENT) {
+                dead_kept++;
+                kept_radius_sum += (f64)radius;
+                kept_years_sum += (f64)years;
+            }
+            continue;
+        }
+        shed++;
+        if ((o->flags & ORGAN_FLAG_DEAD) == 0) { shed_alive++; }
+        if (o->type == ORGAN_ROOT_SEGMENT) { shed_root++; }
+        /* Nothing may be shed in the year it died: a branch that dies and vanishes
+         * within the same step never existed as far as any observer is concerned,
+         * and the recently dead are part of what a real crown shows. */
+        if (years < 1.0f) { too_soon++; }
+        shed_radius_sum += (f64)radius;
+        shed_years_sum += (f64)years;
+
+        /* Never orphan. A shed organ may not have a child that is still attached,
+         * or living wood would be left hanging off nothing -- and the skin pass,
+         * which stops at the first shed organ along an axis, would leave a hole. */
+        {
+            u32 ch = o->first_child;
+            while (ch != TG_INVALID_ID) {
+                const Organ *cc = tree_graph_organ(&t.graph, ch);
+                if ((cc->flags & ORGAN_FLAG_SHED) == 0
+                        && cc->type != ORGAN_ROOT_SEGMENT
+                        && organ_type_is_segment((OrganType)cc->type)) {
+                    orphaned++;
+                }
+                ch = cc->next_sibling;
+            }
+        }
+    }
+    TG_EXPECT_MSG(shed > 0u,
+                  "a 55-year conifer shed nothing: either abscission is not "
+                  "running or nothing has been dead long enough, and in both "
+                  "cases the rest of this case is vacuous");
+    TG_EXPECT_MSG(t.growth.dead_organs_shed == shed,
+                  "the pass reported %u shed organs, the graph carries %u",
+                  t.growth.dead_organs_shed, shed);
+    TG_EXPECT_MSG(shed_alive == 0u, "%u LIVING organs were shed", shed_alive);
+    TG_EXPECT_MSG(shed_root == 0u,
+                  "%u root segments were shed; nothing weathers a root off a "
+                  "standing tree", shed_root);
+    TG_EXPECT_MSG(orphaned == 0u,
+                  "%u shed organs still carry an attached child, which would "
+                  "leave living wood hanging off nothing and a hole in the skin",
+                  orphaned);
+    TG_EXPECT_MSG(too_soon == 0u,
+                  "%u organs were shed in the same step they died", too_soon);
+
+    TG_T_CASE("every shed and every retained organ satisfies the retention rule");
+    /* An earlier version of this case compared the MEAN radius of shed dead wood
+     * against retained dead wood and required the first to be smaller. It failed at
+     * 1.60 mm against 1.60 mm -- not because the radius term was missing but
+     * because a 55-year conifer's dead wood is almost all twigs of the same
+     * thickness, so the comparison was measuring the population rather than the
+     * rule. The rule itself is what to assert, organ by organ:
+     *
+     *   shed          => it had been dead longer than its own retention
+     *   dead, kept    => either it is still within its retention, or something
+     *                    below it is staying, which pins it in place
+     *
+     * `blocked` is recomputed here from first principles rather than read from the
+     * pass, so the two have to agree about which organs are pinned. */
+    TG_EXPECT(dead_kept > 0u);
+    {
+        u8 *blocked = (u8 *)tg_alloc_zero((u64)n);
+        u32 rule_broken_shed = 0, rule_broken_kept = 0;
+        TG_EXPECT(blocked != NULL);
+        if (blocked != NULL) {
+            for (i = n; i-- > 0;) {
+                const Organ *o = tree_graph_organ(&t.graph, i);
+                bool pins = (o->flags & ORGAN_FLAG_SHED) == 0
+                            && !(!organ_type_is_segment((OrganType)o->type)
+                                 && (o->flags & ORGAN_FLAG_DEAD) != 0);
+                if (pins && o->parent != TG_INVALID_ID) {
+                    blocked[o->parent] = 1u;
+                }
+            }
+            for (i = 0; i < n; ++i) {
+                const Organ *o = tree_graph_organ(&t.graph, i);
+                f32 radius, years, retention;
+                if (!organ_type_is_segment((OrganType)o->type)) { continue; }
+                if (o->type == ORGAN_ROOT_SEGMENT) { continue; }
+                radius = 0.5f * (o->radius_base + o->radius_tip);
+                retention = tree_dead_branch_retention(t.resolved.profile, radius);
+                years = (o->death_step <= final_step)
+                          ? (f32)(final_step - o->death_step) : 0.0f;
+                if ((o->flags & ORGAN_FLAG_SHED) != 0) {
+                    if (!(years > retention)) { rule_broken_shed++; }
+                } else if ((o->flags & ORGAN_FLAG_DEAD) != 0) {
+                    if (years > retention && !blocked[i]) { rule_broken_kept++; }
+                }
+            }
+            tg_free(blocked, (u64)n);
+        }
+        TG_EXPECT_MSG(rule_broken_shed == 0u,
+                      "%u organs were shed before their retention had elapsed",
+                      rule_broken_shed);
+        TG_EXPECT_MSG(rule_broken_kept == 0u,
+                      "%u organs are dead past their retention, are pinned by "
+                      "nothing, and are still attached", rule_broken_kept);
+    }
+
+    TG_T_CASE("abscission is driven by age, and thickness buys time");
+    if (shed > 0u && dead_kept > 0u) {
+        f64 shed_y = shed_years_sum / (f64)shed;
+        f64 kept_y = kept_years_sum / (f64)dead_kept;
+        f32 thin = tree_dead_branch_retention(t.resolved.profile, 0.002f);
+        f32 thick = tree_dead_branch_retention(t.resolved.profile, 0.060f);
+        (void)shed_radius_sum; (void)kept_radius_sum;
+        TG_EXPECT_MSG(shed_y > kept_y,
+                      "shed dead wood had been dead %.1f years against %.1f for "
+                      "dead wood still attached: age is not driving abscission",
+                      shed_y, kept_y);
+        /* The radius term asserted on the curve rather than on the population,
+         * because this tree's dead wood is nearly all twigs of one thickness. A
+         * 60 mm limb must outlast a 2 mm twig by a wide margin, or what remains on
+         * the bole will not be the short thick stubs a real conifer carries. */
+        TG_EXPECT_MSG(thick > thin * 4.0f,
+                      "a 60 mm dead limb is retained %.1f years against %.1f for a "
+                      "2 mm twig: thickness barely buys time, so abscission is "
+                      "effectively a flat age cutoff",
+                      (double)thick, (double)thin);
+    }
+
+    TG_T_CASE("the retention curve is monotonic in radius and never instant");
+    {
+        f32 prev = -1.0f;
+        u32 bad_order = 0, bad_floor = 0;
+        for (i = 0; i < 60u; ++i) {
+            f32 rad = 0.0005f * (f32)(i + 1u);
+            f32 yrs = tree_dead_branch_retention(t.resolved.profile, rad);
+            if (yrs < prev) { bad_order++; }
+            if (!(yrs >= 1.0f)) { bad_floor++; }
+            prev = yrs;
+        }
+        TG_EXPECT_MSG(bad_order == 0u,
+                      "the retention curve fell at %u of 60 radii: a thicker dead "
+                      "branch must not drop sooner", bad_order);
+        TG_EXPECT_MSG(bad_floor == 0u,
+                      "%u radii retained for under a year", bad_floor);
+    }
+
+    TG_T_CASE("shedding leaves the wood watertight");
+    /* The skin pass stops at the first shed organ along an axis and relies on the
+     * distal cap to close the stub. If that reasoning is wrong the mesh opens, and
+     * a hole is exactly what no amount of looking at a crown from outside would
+     * reveal. */
+    {
+        MeshValidateReport rep;
+        MeshValidateOptions vo = mesh_validate_default_options();
+        u64 nonmanifold = 0;
+        u32 k;
+        vo.max_scratch_bytes = 1024ull * 1024ull * 1024ull;
+        (void)mesh_validate(&t.mesh, &vo, &rep);
+        TG_EXPECT_MSG(!rep.topology_not_checked,
+                      "the topology pass did not run, so this case measured "
+                      "nothing about watertightness");
+        TG_EXPECT_MSG(rep.boundary_edges[MESH_SECTION_WOOD] == 0u,
+                      "%llu boundary edges after shedding dead wood: stopping the "
+                      "axis sweep at a shed organ left the stub open",
+                      (unsigned long long)rep.boundary_edges[MESH_SECTION_WOOD]);
+        for (k = 0; k < rep.issue_count; ++k) {
+            if (rep.issue[k].kind == MESH_ISSUE_NON_MANIFOLD_EDGE) {
+                nonmanifold += rep.issue[k].count;
+            }
+        }
+        TG_EXPECT_MSG(nonmanifold == 0u,
+                      "%llu non-manifold edges after shedding dead wood",
+                      (unsigned long long)nonmanifold);
+    }
+
+    tree_free(&t);
+}
+
 void test_suite_tree_build(void) {
     test_one_call_produces_a_finished_tree();
+    test_dead_wood_is_shed();
     test_double_free_and_failed_build_are_safe();
     test_cancellation();
     test_determinism_by_fingerprint();

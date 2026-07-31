@@ -1880,3 +1880,91 @@ TgResult tree_growth_roots(TreeGraph *graph, const TreeResolved *r,
     }
     return TG_OK;
 }
+
+
+/* --------------------------------------------------------------------------
+ * Abscission: dead branches fall off.
+ * ------------------------------------------------------------------------ */
+
+TgResult tree_growth_shed_dead_wood(TreeGraph *graph,
+                                    const TreeResolved *resolved,
+                                    u16 final_step, GrowthResult *out_result) {
+    u32 n, i, shed = 0;
+    u8 *blocked;
+    u64 bytes;
+
+    TG_CHECK(graph != NULL && resolved != NULL && resolved->profile != NULL);
+    n = tree_graph_organ_count(graph);
+    if (out_result != NULL) { out_result->dead_organs_shed = 0; }
+    if (n == 0u) { return TG_OK; }
+
+    /* `blocked[i]` means organ i must stay, because something below it is staying.
+     * A dead branch cannot drop while a living twig, or a dead one still within its
+     * own retention, is attached further out: what falls is the whole distal piece
+     * or nothing.
+     *
+     * One DESCENDING sweep computes it without recursion, because growth appends
+     * organs in creation order and a child's id therefore always exceeds its
+     * parent's. That invariant is asserted in the graph validator, so relying on it
+     * here is relying on something checked rather than something assumed. */
+    bytes = (u64)n * sizeof(u8);
+    blocked = (u8 *)tg_alloc_zero(bytes);
+    if (blocked == NULL) {
+        TG_LOG_ERRORF("tree_growth",
+                      "abscission needs %llu bytes and could not get them",
+                      (unsigned long long)bytes);
+        return TG_ERR_OUT_OF_MEMORY;
+    }
+
+    for (i = n; i-- > 0;) {
+        Organ *o = tree_graph_organ_mut(graph, i);
+        bool shed_this = false;
+
+        if (o->type == ORGAN_ROOT_SEGMENT) {
+            /* Roots are underground. Nothing weathers them off a standing tree,
+             * and a root that vanished would leave the plate visibly incomplete in
+             * the cutaway view. Kept, and holds its parent on. */
+        } else if (!organ_type_is_segment((OrganType)o->type)) {
+            /* A bud carries no tube, so there is nothing about it to shed. What
+             * matters is whether it holds its branch on, and the answer depends on
+             * whether it is alive:
+             *
+             *   living  -- a live bud means the wood under it is still attached, so
+             *              it blocks. Epicormic buds sit on old wood for decades.
+             *   dead    -- transparent. If a dead bud blocked its parent, then every
+             *              shoot segment that ever bore a bud would be pinned in
+             *              place for ever and abscission would never fire at all.
+             *              That is not a subtlety: nearly every segment bears one. */
+            if ((o->flags & ORGAN_FLAG_DEAD) != 0) { continue; }
+        } else if ((o->flags & ORGAN_FLAG_DEAD) == 0) {
+            /* Living wood. Stays, and holds everything below it on. */
+        } else if (blocked[i]) {
+            /* Dead, but something below it is staying. */
+        } else {
+            f32 radius = 0.5f * (o->radius_base + o->radius_tip);
+            f32 retention = tree_dead_branch_retention(resolved->profile, radius);
+            /* death_step is 0xFFFF for the living, which this branch has already
+             * excluded; guard anyway rather than trust a flag and a field to agree. */
+            f32 years_dead = (o->death_step <= final_step)
+                               ? (f32)(final_step - o->death_step) : 0.0f;
+            shed_this = (years_dead > retention);
+        }
+
+        if (shed_this) {
+            o->flags |= ORGAN_FLAG_SHED;
+            shed++;
+        } else if (o->parent != TG_INVALID_ID) {
+            blocked[o->parent] = 1u;
+        }
+    }
+
+    tg_free(blocked, bytes);
+    if (out_result != NULL) { out_result->dead_organs_shed = shed; }
+    if (shed > 0u) {
+        TG_LOG_INFOF("tree_growth",
+                     "%u dead organs have dropped off; retention at 5 mm is "
+                     "%.1f years for this profile",
+                     shed, (double)resolved->profile->dead_branch_retention_years);
+    }
+    return TG_OK;
+}
