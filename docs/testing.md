@@ -180,6 +180,7 @@ otherwise be likely to ship.
 | the collar measured as a fillet in the field, not asserted | a collar added as decoration rather than produced by the smooth union, which is what research.md requires |
 | inseparable union emits NOTHING | a ring left unreachable: a hole the size of a branch, reported as success |
 | boundary normals perpendicular to their limb axis | normals taken from the clipped field rather than the smooth union, which is invisible to every topological check and renders as a dark sawtooth band around every seam; found by a capture, and the test was verified by reintroducing the defect |
+| region query checked against a linear scan, with the discarded algorithm run alongside | a summary query that samples and calls itself complete. The old version examined the first 4096 triangles and de-duplicated organs with a one-element memo against a spatially permuted traversal, reporting 25 organs where there were 6 while its own `truncated` flag read false. The old test asserted `organs > 0`, which is why a factor-of-four error passed for the whole of Layer 2. The case now reproduces the run-counting algorithm and requires it to DISAGREE on all four boxes, so it cannot become an identity |
 | junction patch carries an organ id and a birth step | junction geometry that cannot be inspected, or that appears at step zero and shows a fully formed fork under a seedling |
 
 ## 5. Rules
@@ -197,9 +198,9 @@ Run on the development host (Linux x86-64), both available compilers:
 
 | Configuration | Result |
 |---|---|
-| clang 15.0.7, release (`-O2 -DNDEBUG`) | 452 cases, 680 589 checks, 0 failures |
-| gcc 11.5.0, release | 452 cases, 680 589 checks, 0 failures |
-| clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | 452 cases, 680 589 checks, 0 failures, one run |
+| clang 15.0.7, release (`-O2 -DNDEBUG`) | 453 cases, 680 604 checks, 0 failures |
+| gcc 11.5.0, release | 453 cases, 680 604 checks, 0 failures |
+| clang 15.0.7, debug (`-O0 -g3 -DTG_DEBUG=1`) | 453 cases, 680 604 checks, 0 failures, one run |
 | gcc 11.5.0, debug | compiles clean; `geom/junction`, `geom/mesh`, `tree/build`, `tree/bark`, `tree/foliage` run, 0 failures |
 
 All three complete runs produce **identical case and check counts**, including
@@ -207,12 +208,12 @@ identical per-suite counts, across two compilers and both optimisation settings.
 The debug run exercises every `TG_CHECK` internal assertion, which the release
 build compiles out.
 
-The check total FELL from 711 007 to 680 589 while the case count rose from 448 to
-452. That is not lost coverage: making shade death reachable made the trees smaller
+The check total FELL from 711 007 to 680 604 while the case count rose from 448 to
+453. That is not lost coverage: making shade death reachable made the trees smaller
 (179 477 shoot segments to 132 546 for the 60-year conifer), and several suites
 accumulate one check per organ. Four new cases were added -- the two-sided mortality
 band, per-profile shade reachability, its non-vacuity probe, and the pinned-budget
-thinning precondition.
+thinning precondition, plus the exact region query checked against a linear scan.
 
 **Determinism, measured across compilers and configurations.** Four builds -- clang and
 gcc, `-O0 -DTG_DEBUG=1` and `-O2 -DNDEBUG` -- produce byte-identical tree fingerprints,

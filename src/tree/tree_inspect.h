@@ -87,10 +87,21 @@ u64 tree_inspect_describe(const Tree *t, const InspectResult *r, char *buf,
                           u64 size);
 
 /* Summary of everything inside a box, for a region query rather than a point one:
- * "what is in this part of the crown". */
+ * "what is in this part of the crown".
+ *
+ * Every field is EXACT over the triangles whose bounds overlap the box. There is
+ * no sampling and therefore no `truncated` flag -- that field existed, and was the
+ * problem rather than the mitigation: the query examined the first 4096 triangles
+ * and reported truncated = false whenever a box fitted inside that buffer, while
+ * still miscounting organs by a factor of four because it de-duplicated them with
+ * a one-element memo against a spatially permuted traversal. A flag that is clear
+ * when the answer is wrong is worse than no flag. See tree_inspect.c. */
+/* SCOPE. The counts cover the sections the tree's BVH was built over, which by
+ * default is wood only. A region query is therefore "what wood is in this box",
+ * not "what mesh is in this box", unless the tree was built with a wider mask. */
 typedef struct InspectRegion {
     u32 triangles;
-    u32 organs;              /* distinct organs touched                       */
+    u32 organs;              /* distinct organs touched, counted exactly      */
     u32 living_organs;
     u32 max_branch_order;
     u16 earliest_step;
@@ -98,7 +109,6 @@ typedef struct InspectRegion {
     f32 total_leaf_area_m2;  /* borne BY the organs in the box                */
     f32 min_radius_m;
     f32 max_radius_m;
-    bool truncated;          /* the box held more triangles than were sampled */
 } InspectRegion;
 
 bool tree_inspect_region(const Tree *t, Aabb box, InspectRegion *out);

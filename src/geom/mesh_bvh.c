@@ -396,18 +396,14 @@ bool mesh_bvh_raycast(const MeshBvh *bvh, const Mesh *m, Ray ray,
     return best.hit;
 }
 
-TgResult mesh_bvh_query_box(const MeshBvh *bvh, const Mesh *m, Aabb box,
-                            u64 *out_ids, u32 capacity, u32 *out_written,
-                            u32 *out_total) {
+u32 mesh_bvh_visit_box(const MeshBvh *bvh, const Mesh *m, Aabb box,
+                       MeshBvhBoxVisitor visit, void *user) {
     u32 stack[MB_MAX_DEPTH * 2u + 4u];
     u32 sp = 0;
-    u32 written = 0;
     u32 total = 0;
 
-    TG_CHECK(bvh != NULL && m != NULL);
-    if (out_written != NULL) { *out_written = 0; }
-    if (out_total != NULL) { *out_total = 0; }
-    if (bvh->node_count == 0u) { return TG_OK; }
+    TG_CHECK(bvh != NULL && m != NULL && visit != NULL);
+    if (bvh->node_count == 0u) { return 0u; }
 
     stack[sp++] = 0u;
     while (sp > 0u) {
@@ -425,9 +421,7 @@ TgResult mesh_bvh_query_box(const MeshBvh *bvh, const Mesh *m, Aabb box,
                 tb = aabb_add_point(tb, t.position[2]);
                 if (!aabb_overlaps(tb, box)) { continue; }
                 total++;
-                if (written < capacity && out_ids != NULL) {
-                    out_ids[written++] = tri;
-                }
+                visit(tri, &t, user);
             }
             continue;
         }
@@ -435,9 +429,42 @@ TgResult mesh_bvh_query_box(const MeshBvh *bvh, const Mesh *m, Aabb box,
         stack[sp++] = n->first + 1u;
         TG_CHECK(sp < (u32)TG_COUNTOF(stack));
     }
-    if (out_written != NULL) { *out_written = written; }
+    return total;
+}
+
+/* The buffered query is the visiting query plus a bounded writer, so there is one
+ * traversal to be correct rather than two to keep in step. */
+typedef struct BoxCollect {
+    u64 *ids;
+    u32  capacity;
+    u32  written;
+} BoxCollect;
+
+static void box_collect(u64 tri, const MeshTriangle *t, void *user) {
+    BoxCollect *c = (BoxCollect *)user;
+    (void)t;
+    if (c->written < c->capacity && c->ids != NULL) { c->ids[c->written++] = tri; }
+}
+
+TgResult mesh_bvh_query_box(const MeshBvh *bvh, const Mesh *m, Aabb box,
+                            u64 *out_ids, u32 capacity, u32 *out_written,
+                            u32 *out_total) {
+    BoxCollect c;
+    u32 total;
+
+    TG_CHECK(bvh != NULL && m != NULL);
+    if (out_written != NULL) { *out_written = 0; }
+    if (out_total != NULL) { *out_total = 0; }
+    if (bvh->node_count == 0u) { return TG_OK; }
+
+    c.ids = out_ids;
+    c.capacity = capacity;
+    c.written = 0u;
+    total = mesh_bvh_visit_box(bvh, m, box, box_collect, &c);
+
+    if (out_written != NULL) { *out_written = c.written; }
     if (out_total != NULL) { *out_total = total; }
     /* A truncated answer is reported as such rather than silently clipped: a
      * caller that cannot tell the difference will draw the wrong conclusion. */
-    return (total > written) ? TG_ERR_LIMIT_EXCEEDED : TG_OK;
+    return (total > c.written) ? TG_ERR_LIMIT_EXCEEDED : TG_OK;
 }

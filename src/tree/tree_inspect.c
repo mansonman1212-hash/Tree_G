@@ -2,6 +2,7 @@
 #include "tree_mechanics.h"
 
 #include "../core/log.h"
+#include "../core/mem.h"
 
 #include <stdio.h>
 #include <string.h>
@@ -158,16 +159,82 @@ u64 tree_inspect_describe(const Tree *t, const InspectResult *r, char *buf,
     return (u64)n;
 }
 
+/* State for the region walk. The organ set is a BITSET over organ ids, which is
+ * what makes "distinct organs" an exact count rather than an estimate. One bit per
+ * organ is 149 KB for the largest tree this engine builds (1 190 126 organs), so
+ * exactness here costs less than the sample buffer it replaces cost in stack. */
+typedef struct RegionWalk {
+    const Tree   *tree;
+    InspectRegion *out;
+    u64          *seen;        /* one bit per organ id                          */
+    u32           organ_count;
+} RegionWalk;
+
+static void region_visit(u64 triangle, const MeshTriangle *tri, void *user) {
+    RegionWalk *w = (RegionWalk *)user;
+    InspectRegion *out = w->out;
+    const Organ *o;
+    u32 id = tri->organ_id;
+
+    (void)triangle;
+    out->triangles++;
+    if (id >= w->organ_count) { return; }
+    /* Exact de-duplication. Every accumulation below is PER ORGAN, so an organ
+     * whose triangles are scattered across the BVH -- which is every organ, because
+     * the build permutes spatially -- must contribute exactly once. */
+    if ((w->seen[id >> 6] >> (id & 63u)) & 1u) { return; }
+    w->seen[id >> 6] |= 1ull << (id & 63u);
+
+    o = tree_graph_organ(&w->tree->graph, id);
+    out->organs++;
+    if ((o->flags & ORGAN_FLAG_DEAD) == 0) { out->living_organs++; }
+    if (o->branch_order > out->max_branch_order) {
+        out->max_branch_order = o->branch_order;
+    }
+    if (o->created_step < out->earliest_step) {
+        out->earliest_step = o->created_step;
+    }
+    if (o->created_step > out->latest_step) {
+        out->latest_step = o->created_step;
+    }
+    out->total_leaf_area_m2 +=
+        tree_mechanics_segment_leaf_area(o, &w->tree->resolved,
+                                         (u16)w->tree->resolved.growth_steps);
+    if (o->radius_base > out->max_radius_m) {
+        out->max_radius_m = o->radius_base;
+    }
+    if (o->radius_tip < out->min_radius_m && o->radius_tip > 0.0f) {
+        out->min_radius_m = o->radius_tip;
+    }
+}
+
 bool tree_inspect_region(const Tree *t, Aabb box, InspectRegion *out) {
-    /* A fixed sample buffer rather than an allocation. A region query is an
-     * interactive operation and the answer is a SUMMARY: sampling up to this many
-     * triangles gives stable statistics, and the truncation is reported so a caller
-     * cannot mistake a sample for a census. */
-    enum { MAX_TRIS = 4096 };
-    u64 ids[MAX_TRIS];
-    u32 written = 0, total = 0;
-    u32 i;
-    u32 last_organ = TG_INVALID_ID;
+    /* This query used to sample the first 4096 triangles the BVH handed back and
+     * count distinct organs with a ONE-ELEMENT memo, on the stated grounds that
+     * "triangles arrive grouped by organ because the skin pass emits them that
+     * way". They do not: mesh_bvh_query_box walks bvh->tri_ids, which the build
+     * spatially permutes, so an organ's triangles arrive in many separate runs and
+     * each run was counted as another organ. Measured on a 40-year broadleaf, the
+     * two errors ran in opposite directions and neither was small:
+     *
+     *     box       organs reported / exact      living        truncated
+     *      4%           25 / 6    (x4.17)      x7.50          NO
+     *      8%          213 / 92   (x2.32)      x4.10          yes
+     *     16%          595 / 1520 (x0.39)      x1.37          yes
+     *     32%          941 / 8805 (x0.11)      x0.19          yes
+     *
+     * The 4% box is the one that matters. It fitted inside the sample buffer
+     * entirely, so the function reported truncated = false -- a caller doing
+     * exactly what the API told it to do got an answer four times too large with no
+     * indication at all. Leaf area was worse: 0.000 m2 reported against 0.039 m2
+     * present, because a scattered organ's area was added on its first run and
+     * whichever organ happened to end a run was skipped.
+     *
+     * So: every overlapping triangle is now visited, and organs are de-duplicated
+     * through a bitset. There is no sample and no truncation. */
+    RegionWalk w;
+    u32 organ_count;
+    u64 words, bytes;
 
     TG_CHECK(t != NULL && out != NULL);
     memset(out, 0, sizeof *out);
@@ -175,45 +242,28 @@ bool tree_inspect_region(const Tree *t, Aabb box, InspectRegion *out) {
     out->earliest_step = 0xFFFFu;
     if (t->bvh.node_count == 0u) { return false; }
 
-    (void)mesh_bvh_query_box(&t->bvh, &t->mesh, box, ids, (u32)MAX_TRIS,
-                             &written, &total);
-    out->triangles = total;
-    out->truncated = (total > written);
-    if (written == 0u) { return false; }
-
-    for (i = 0; i < written; ++i) {
-        MeshTriangle tri;
-        const Organ *o;
-        if (!mesh_get_triangle(&t->mesh, ids[i], &tri)) { continue; }
-        if (tri.organ_id >= tree_graph_organ_count(&t->graph)) { continue; }
-        /* Triangles arrive grouped by organ because the skin pass emits them that
-         * way, so a one-element memo counts distinct organs without a set. It is
-         * an approximation only if that grouping changes, and it is stated as one. */
-        if (tri.organ_id == last_organ) { continue; }
-        last_organ = tri.organ_id;
-        o = tree_graph_organ(&t->graph, tri.organ_id);
-        out->organs++;
-        if ((o->flags & ORGAN_FLAG_DEAD) == 0) { out->living_organs++; }
-        if (o->branch_order > out->max_branch_order) {
-            out->max_branch_order = o->branch_order;
-        }
-        if (o->created_step < out->earliest_step) {
-            out->earliest_step = o->created_step;
-        }
-        if (o->created_step > out->latest_step) {
-            out->latest_step = o->created_step;
-        }
-        out->total_leaf_area_m2 +=
-            tree_mechanics_segment_leaf_area(o, &t->resolved,
-                                             (u16)t->resolved.growth_steps);
-        if (o->radius_base > out->max_radius_m) {
-            out->max_radius_m = o->radius_base;
-        }
-        if (o->radius_tip < out->min_radius_m && o->radius_tip > 0.0f) {
-            out->min_radius_m = o->radius_tip;
-        }
+    organ_count = tree_graph_organ_count(&t->graph);
+    words = ((u64)organ_count + 63u) / 64u;
+    bytes = words * sizeof(u64);
+    w.seen = (words > 0u) ? (u64 *)tg_alloc_zero(bytes) : NULL;
+    if (words > 0u && w.seen == NULL) {
+        /* Refuse rather than fall back to the sampling estimate. A caller cannot
+         * act on a number whose accuracy depends on whether an allocation
+         * succeeded, and silently degrading is how the old behaviour survived. */
+        TG_LOG_WARNF("tree_inspect",
+                     "region query needs %llu bytes to count organs exactly and "
+                     "could not get them; refusing rather than estimating",
+                     (unsigned long long)bytes);
+        return false;
     }
+
+    w.tree = t;
+    w.out = out;
+    w.organ_count = organ_count;
+    (void)mesh_bvh_visit_box(&t->bvh, &t->mesh, box, region_visit, &w);
+    tg_free(w.seen, bytes);
+
     if (out->min_radius_m > 1.0e8f) { out->min_radius_m = 0.0f; }
     if (out->earliest_step == 0xFFFFu) { out->earliest_step = 0u; }
-    return true;
+    return out->triangles > 0u;
 }

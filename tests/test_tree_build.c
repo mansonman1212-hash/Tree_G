@@ -22,8 +22,11 @@
 
 #include "../src/tree/tree_build.h"
 #include "../src/tree/tree_inspect.h"
+#include "../src/tree/tree_mechanics.h"
+#include "../src/core/mem.h"
 
 #include <string.h>
+#include <math.h>
 
 typedef struct ProgressLog {
     u32 calls;
@@ -477,20 +480,149 @@ static void test_inspection_reports_the_truth(void) {
         TG_EXPECT(tree_inspect_describe(&t, &res, NULL, 0) > 0u);
     }
 
-    TG_T_CASE("a region query summarises what is inside a box");
+    TG_T_CASE("a region query counts EXACTLY, checked against a linear scan");
+    /* The old version of this case asserted `reg.organs > 0`, and that is exactly
+     * why it never noticed that the number was four times too large. The
+     * expectation now comes from an independent computation -- a linear scan over
+     * every triangle in the mesh with its own per-organ bitset, which shares no
+     * code path with the BVH traversal the query uses -- rather than from the
+     * implementation.
+     *
+     * Four nested boxes, because the two defects appeared at different scales: the
+     * memo error dominated small boxes and the 4096-triangle sample dominated large
+     * ones. A single box size would have caught at most one of them. */
+    {
+        u32 norg = tree_graph_organ_count(&t.graph);
+        u64 words = ((u64)norg + 63u) / 64u;
+        u64 *seen = (u64 *)tg_alloc_zero(words * sizeof(u64));
+        u32 bad_tris = 0, bad_organs = 0, bad_living = 0, bad_leaf = 0;
+        u32 memo_differed = 0, boxes_checked = 0;
+        u32 scale;
+
+        TG_EXPECT(seen != NULL);
+        for (scale = 0; scale < 4u && seen != NULL; ++scale) {
+            f32 frac = 0.05f * (f32)(1u << scale);
+            V3 c = aabb_center(bb);
+            V3 ext = v3_scale(aabb_extent(bb), frac * 0.5f);
+            Aabb box;
+            InspectRegion reg;
+            u32 e_tris = 0, e_organs = 0, e_living = 0;
+            f32 e_leaf = 0.0f;
+            u32 memo_organs = 0, memo_last = TG_INVALID_ID;
+            u64 k;
+
+            box.mn = v3_sub(c, ext);
+            box.mx = v3_add(c, ext);
+
+            /* Independent reference: scan the whole mesh, de-duplicate exactly. */
+            memset(seen, 0, words * sizeof(u64));
+            for (k = 0; k < mesh_triangle_count(&t.mesh); ++k) {
+                MeshTriangle tr;
+                Aabb tb = aabb_empty();
+                const Organ *o;
+                if (!mesh_get_triangle(&t.mesh, k, &tr)) { continue; }
+                /* Scoped to the sections the BVH was built over -- by default wood
+                 * only, so an inspection cursor does not snap to a leaf. Scanning
+                 * the whole mesh here would compare two different questions. */
+                if ((u32)tr.section >= 32u) { continue; }
+                if ((t.bvh.section_mask & (1u << (u32)tr.section)) == 0u) {
+                    continue;
+                }
+                tb = aabb_add_point(tb, tr.position[0]);
+                tb = aabb_add_point(tb, tr.position[1]);
+                tb = aabb_add_point(tb, tr.position[2]);
+                if (!aabb_overlaps(tb, box)) { continue; }
+                e_tris++;
+                if (tr.organ_id >= norg) { continue; }
+                if ((seen[tr.organ_id >> 6] >> (tr.organ_id & 63u)) & 1u) {
+                    continue;
+                }
+                seen[tr.organ_id >> 6] |= 1ull << (tr.organ_id & 63u);
+                o = tree_graph_organ(&t.graph, tr.organ_id);
+                e_organs++;
+                if ((o->flags & ORGAN_FLAG_DEAD) == 0) { e_living++; }
+                e_leaf += tree_mechanics_segment_leaf_area(
+                              o, &t.resolved, (u16)t.resolved.growth_steps);
+            }
+            if (e_tris == 0u) { continue; }
+            boxes_checked++;
+
+            TG_EXPECT(tree_inspect_region(&t, box, &reg));
+            if (reg.triangles != e_tris)       { bad_tris++; }
+            if (reg.organs != e_organs)        { bad_organs++; }
+            if (reg.living_organs != e_living) { bad_living++; }
+            if (fabsf(reg.total_leaf_area_m2 - e_leaf)
+                    > tg_maxf(e_leaf * 1e-4f, 1e-6f)) {
+                bad_leaf++;
+            }
+
+            /* NON-VACUITY. Reproduce the discarded algorithm -- count RUNS of the
+             * same organ id in BVH traversal order -- and require that it gives a
+             * different answer. Without this the test could pass over a mesh whose
+             * traversal order happened to be organ-grouped, and would then be
+             * asserting nothing at all, which is the failure the whole case
+             * exists to correct. */
+            {
+                u64 *ids = (u64 *)tg_alloc(sizeof(u64) * 4096u);
+                u32 written = 0, total = 0, j;
+                if (ids != NULL) {
+                    (void)mesh_bvh_query_box(&t.bvh, &t.mesh, box, ids, 4096u,
+                                             &written, &total);
+                    for (j = 0; j < written; ++j) {
+                        MeshTriangle tr;
+                        if (!mesh_get_triangle(&t.mesh, ids[j], &tr)) { continue; }
+                        if (tr.organ_id >= norg) { continue; }
+                        if (tr.organ_id == memo_last) { continue; }
+                        memo_last = tr.organ_id;
+                        memo_organs++;
+                    }
+                    if (memo_organs != e_organs) { memo_differed++; }
+                    tg_free(ids, sizeof(u64) * 4096u);
+                }
+            }
+        }
+        tg_free(seen, words * sizeof(u64));
+
+        TG_EXPECT_MSG(boxes_checked == 4u,
+                      "only %u of 4 nested boxes contained any geometry",
+                      boxes_checked);
+        TG_EXPECT_MSG(bad_tris == 0u,
+                      "%u boxes reported a triangle count a linear scan disagrees "
+                      "with", bad_tris);
+        TG_EXPECT_MSG(bad_organs == 0u,
+                      "%u boxes reported a distinct-organ count a linear scan "
+                      "disagrees with", bad_organs);
+        TG_EXPECT_MSG(bad_living == 0u,
+                      "%u boxes reported a living-organ count a linear scan "
+                      "disagrees with", bad_living);
+        TG_EXPECT_MSG(bad_leaf == 0u,
+                      "%u boxes reported a leaf area a linear scan disagrees with",
+                      bad_leaf);
+        TG_EXPECT_MSG(memo_differed == 4u,
+                      "the discarded run-counting algorithm agreed with the exact "
+                      "count on %u of 4 boxes: this test cannot distinguish the "
+                      "two, so it is not testing anything",
+                      4u - memo_differed);
+    }
+
+    TG_T_CASE("a region query reports facts consistent with the tree");
     {
         InspectRegion reg;
         Aabb box = aabb_expand(bb, -0.5f);
         TG_EXPECT(tree_inspect_region(&t, box, &reg));
         TG_EXPECT_MSG(reg.organs > 0u, "no organs found inside the crown bounds");
+        TG_EXPECT(reg.organs <= tree_graph_organ_count(&t.graph));
+        TG_EXPECT(reg.living_organs <= reg.organs);
         TG_EXPECT(reg.max_branch_order <= t.growth.max_order_reached);
         TG_EXPECT(reg.latest_step >= reg.earliest_step);
+        TG_EXPECT(reg.min_radius_m <= reg.max_radius_m);
         /* A box below the roots must contain nothing, and must say so rather than
          * returning stale statistics. */
         box.mn = v3(-1000.0f, -1000.0f, -1000.0f);
         box.mx = v3(-999.0f, -999.0f, -999.0f);
         TG_EXPECT(!tree_inspect_region(&t, box, &reg));
         TG_EXPECT(reg.organs == 0u);
+        TG_EXPECT(reg.triangles == 0u);
     }
 
     tree_free(&t);

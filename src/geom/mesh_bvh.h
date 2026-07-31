@@ -111,4 +111,25 @@ TgResult mesh_bvh_query_box(const MeshBvh *bvh, const Mesh *m, Aabb box,
                             u64 *out_ids, u32 capacity, u32 *out_written,
                             u32 *out_total);
 
+/* Called once per overlapping triangle. `tri` is the triangle the traversal
+ * already fetched, passed on so a visitor does not fetch it a second time. */
+typedef void (*MeshBvhBoxVisitor)(u64 triangle, const MeshTriangle *tri,
+                                  void *user);
+
+/* Every triangle whose bounds overlap `box`, handed to `visit` as it is found.
+ * Returns the number visited.
+ *
+ * The buffered form above cannot answer a question about a region larger than its
+ * caller's array, and a caller that wants an exact answer over a whole crown would
+ * have to size that array to the triangle count -- which for these meshes is tens
+ * of millions of ids. This form has no capacity and therefore no truncation, at the
+ * cost of the caller doing its accumulation incrementally.
+ *
+ * Ordering is BVH LEAF ORDER, which the build spatially permutes. It is
+ * deterministic for a given BVH but it is NOT mesh order, so a visitor must not
+ * assume that triangles of the same organ arrive consecutively. Assuming exactly
+ * that is what made tree_inspect_region report four times too many organs. */
+u32 mesh_bvh_visit_box(const MeshBvh *bvh, const Mesh *m, Aabb box,
+                       MeshBvhBoxVisitor visit, void *user);
+
 #endif /* TG_MESH_BVH_H */

@@ -523,10 +523,46 @@ shape does not depend on rounding.
 13. **Root growth is inferred, not simulated.** Root birth steps come from position
    along the root axis mapped onto the shoot growth curve. Real roots respond to
    soil, water and obstruction on their own schedule.
-14. **Region inspection samples rather than enumerates.** `tree_inspect_region`
-   examines up to 4096 triangles and counts distinct organs with a one-element memo
-   that relies on triangles arriving grouped by organ. Both are stated in the source
-   and the truncation is reported to the caller.
+14. ~~**Region inspection samples rather than enumerates.**~~ **FIXED**, and it was
+   worse than this entry claimed. The one-element memo was justified in the source by
+   "triangles arrive grouped by organ because the skin pass emits them that way".
+   They do not: `mesh_bvh_query_box` walks `bvh->tri_ids`, which the build
+   **spatially permutes**, so an organ's triangles arrive in many separate runs and
+   every run was counted as another organ. Measured on a 40-year broadleaf against a
+   linear scan with a real per-organ bitset, the sampling error and the memo error
+   ran in **opposite directions** and neither was small:
+
+   | box (fraction of bounds) | organs reported / exact | living | leaf area m² | `truncated` |
+   |---|---|---|---|---|
+   | 4% | 25 / **6** (×4.17) | ×7.50 | — | **no** |
+   | 8% | 213 / 92 (×2.32) | ×4.10 | 0.000 / 0.039 | yes |
+   | 16% | 595 / 1 520 (×0.39) | ×1.37 | 0.000 / 0.522 | yes |
+   | 32% | 941 / **8 805** (×0.11) | ×0.19 | 5.638 / 7.593 | yes |
+
+   The 4% row is the one that mattered. It fitted inside the sample buffer entirely,
+   so the function reported `truncated = false` — a caller doing exactly what the API
+   documented got an answer four times too large with no indication at all. A flag
+   that is clear when the answer is wrong is worse than no flag, so the field is
+   gone rather than kept for compatibility. Leaf area could be reported as 0.000 m²
+   where 0.039 m² was present, because a scattered organ's area was added on its
+   first run and whichever organ ended a run was skipped.
+
+   `mesh_bvh_visit_box` now enumerates every overlapping triangle with no capacity
+   and therefore no truncation, and organs are de-duplicated through a bitset over
+   organ ids — 149 KB for the largest tree this engine builds, less than the sample
+   buffer it replaced cost in stack. The buffered `mesh_bvh_query_box` is
+   reimplemented on top of it so there is one traversal to keep correct rather than
+   two to keep in step. If the bitset cannot be allocated the query **refuses**
+   rather than degrading to the estimate, because a number whose accuracy depends on
+   whether an allocation succeeded cannot be acted on.
+
+   All four columns now match the linear scan exactly at every box size. The test
+   takes its expectation from that independent scan rather than from the
+   implementation, and carries its own non-vacuity proof: it reproduces the
+   discarded run-counting algorithm over the same traversal and requires it to
+   disagree on all four boxes, so the case cannot quietly become an identity.
+   Scope is now stated in the header: the counts cover the sections the BVH was
+   built over, which by default is wood only.
 15. **Leaf veins and midrib relief do not exist.** The blade is a smooth shell. The
    relief belongs in a leaf-detail pass that displaces this surface at high
    quality; an earlier attempt to carry a midrib in the blade's TOPOLOGY produced
