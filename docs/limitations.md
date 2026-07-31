@@ -555,11 +555,41 @@ shape does not depend on rounding.
    its lower crown dies, leaving a ten-metre naked bole under a flat disc of foliage
    with detached-looking clumps below. This is item 7's consequence made visible and
    needs the retrenchment model, not a shape parameter.
-4. **The crown/height ratio may be too generous.** 19.19 m of crown on an 18.93 m
-   broadleaf gives a leaf area index of 2.1 where a closed crown shows 4-6. The
-   leaf area itself is correct, so either the crown is too wide or the tree should
-   carry more foliage-bearing shoot. Not adjusted, because guessing which would be
-   fitting one number by breaking another.
+4. **Leaf area index is far too low, and the cause is now known.** This entry used
+   to end "either the crown is too wide or the tree should carry more foliage-bearing
+   shoot. Not adjusted, because guessing which would be fitting one number by
+   breaking another." That was the right refusal, and it is now resolved by
+   measurement rather than by guessing.
+
+   Binning every shoot tip of the 80-year broadleaf by height and comparing its
+   reach against the envelope allowed there, the crown fills only **56–89% of its
+   envelope**, peaking at 7.73 m of reach against 9.59 m allowed. **The crown is not
+   too wide — the tree cannot even reach the width it is given.** So the deficit is
+   foliage-bearing shoot, and the ambiguity is closed.
+
+   | measured over the 80-year broadleaf | value |
+   |---|---|
+   | realised leaf area | 287.9 m² |
+   | realised crown radius | 7.73 m (projected 187.7 m²) |
+   | **LAI against the realised crown** | **1.53** |
+   | LAI against the envelope it was given | 1.00 |
+   | a closed broadleaf crown | 4–6 |
+   | an open-grown oak | roughly 2–3 |
+
+   Note the contrast with the conifer, which fills 108–131% of its envelope: the two
+   categories are limited by different things, and a single "crowns are too sparse"
+   diagnosis would have been wrong for one of them. That is exactly why the
+   measurement had to come before the adjustment.
+
+   Not yet fixed, and deliberately so: reaching LAI 4 means roughly 2.6× the leaves,
+   which is 236 000 blades and 8.5 million triangles of foliage alone on top of the
+   wood, and 2.6× the foliage mass through the mechanics pass and therefore
+   materially more sag. It is a cross-cutting change that needs the LOD work of item
+   5 in front of it, not a constant to raise.
+
+   The same shortfall is visible at the other end of the age range: the 12-year
+   sapling carries **180 leaves** over 55 bearing shoots, where a real oak sapling of
+   that age carries a few thousand.
 5. **Mesh size is still far beyond a real-time budget**, though materially less so.
    Shedding dead wood (item 16) removed geometry that was invisible anyway: the
    220-year broadleaf fell from 27.1 to **11.8 million** wood triangles (-56%) and
